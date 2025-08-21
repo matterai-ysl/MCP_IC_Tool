@@ -169,6 +169,39 @@ class TaskManager:
                         task.error_message = result.get('error', '态密度计算失败')  # type: ignore
                 finally:
                     loop.close()
+            elif str(task.task_type) == "md_calculation":  # type: ignore
+                import asyncio
+                from ..vasp_worker import VaspWorker
+                
+                # 为当前用户创建专用的 VaspWorker
+                user_vasp_worker = VaspWorker(
+                    user_id=str(task.user_id),  # type: ignore
+                    base_work_dir="/data/home/ysl9527/vasp_calculations"
+                )
+                
+                # 创建新的事件循环
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(
+                        user_vasp_worker.run_md_calculation(
+                            task_id, task.params or {}, progress_callback  # type: ignore
+                        )
+                    )
+                    
+                    if result.get('success'):
+                        task.status = "completed"  # type: ignore
+                        task.progress = 100  # type: ignore
+                        task.result_path = result.get('work_directory')  # type: ignore
+                        task.error_message = None  # type: ignore
+                        # 确保PID被设置（如果还没有设置的话）
+                        if result.get('process_id') and not task.process_id:  # type: ignore
+                            task.process_id = result.get('process_id')  # type: ignore
+                    else:
+                        task.status = "failed"  # type: ignore
+                        task.error_message = result.get('error', '分子动力学计算失败')  # type: ignore
+                finally:
+                    loop.close()
             else:
                 # 模拟其他类型的任务
                 for step in range(1, 21):

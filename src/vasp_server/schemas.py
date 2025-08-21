@@ -194,4 +194,62 @@ class DOSResult(BaseModel):
     dos_data: Optional[dict] = Field(None, description="态密度数据")
     convergence: bool = Field(False, description="是否收敛")
     computation_time: Optional[float] = Field(None, description="计算耗时 (秒)")
-    kpoints_used: Optional[list] = Field(None, description="使用的K点网格") 
+    kpoints_used: Optional[list] = Field(None, description="使用的K点网格")
+
+class MDRequest(BaseModel):
+    """分子动力学计算请求模型"""
+    # 用户ID（必填）
+    user_id: str = Field(..., description="用户ID")
+    
+    # 输入源（三选一）
+    formula: Optional[str] = Field(None, description="化学式，如 'Li2O', 'LiFePO4'")
+    cif_url: Optional[HttpUrl] = Field(None, description="CIF文件的URL地址")
+    scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
+    
+    # 计算类型（必填）
+    calc_type: CalcType = Field(..., description="计算类型")
+    
+    # 材料搜索参数（仅当使用formula时有效）
+    spacegroup: Optional[str] = Field(None, description="空间群符号")
+    max_energy_above_hull: Optional[float] = Field(0.1, description="最大能量上凸包距离 (eV/atom)")
+    min_band_gap: Optional[float] = Field(None, description="最小带隙 (eV)")
+    max_band_gap: Optional[float] = Field(None, description="最大带隙 (eV)")
+    max_nsites: Optional[int] = Field(None, description="最大原子数")
+    min_nsites: Optional[int] = Field(None, description="最小原子数")
+    stable_only: bool = Field(True, description="只选择稳定材料")
+    selection_mode: SelectionMode = Field(SelectionMode.auto, description="选择模式")
+    
+    # MD计算参数
+    md_steps: int = Field(1000, description="MD步数")
+    temperature: float = Field(300.0, description="目标温度 (K)")
+    time_step: float = Field(1.0, description="时间步长 (fs)")
+    ensemble: str = Field("NVT", description="系综类型 (NVT, NVE, NPT)")
+    precision: str = Field("Normal", description="计算精度 (Normal, High, Accurate)")
+    
+    def model_post_init(self, __context) -> None:
+        """验证输入参数"""
+        input_count = sum([
+            bool(self.formula),
+            bool(self.cif_url), 
+            bool(self.scf_task_id)
+        ])
+        if input_count != 1:
+            raise ValueError("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+
+class MDResponse(BaseModel):
+    """分子动力学计算响应模型"""
+    task_id: str = Field(..., description="任务ID")
+    status: TaskStatus = Field(..., description="任务状态")
+    message: str = Field(..., description="响应消息")
+
+class MDResult(BaseModel):
+    """分子动力学计算结果模型"""
+    md_structure: Optional[str] = Field(None, description="MD计算的初始结构文件路径")
+    xdatcar_path: Optional[str] = Field(None, description="XDATCAR轨迹文件路径")
+    oszicar_path: Optional[str] = Field(None, description="OSZICAR能量文件路径")
+    final_energy: Optional[float] = Field(None, description="最终能量 (eV)")
+    average_temperature: Optional[float] = Field(None, description="平均温度 (K)")
+    total_md_steps: Optional[int] = Field(None, description="完成的MD步数")
+    convergence: bool = Field(False, description="是否正常完成")
+    computation_time: Optional[float] = Field(None, description="计算耗时 (秒)")
+    trajectory_data: Optional[dict] = Field(None, description="轨迹统计数据") 

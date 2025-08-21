@@ -4,8 +4,9 @@
 
 演示如何使用VASP API进行态密度计算，包括：
 1. 基于已完成的自洽场计算进行态密度计算
-2. 完整的工作流程：结构优化 → 自洽场计算 → 态密度计算
-3. 态密度结果分析
+2. 单点自洽+DOS计算（一步搞定，从化学式直接到DOS）
+3. 完整的工作流程：结构优化 → 自洽场计算 → 态密度计算
+4. 态密度结果分析
 """
 
 import requests
@@ -76,6 +77,49 @@ def find_completed_scf_tasks(user_id: str = "dos_example_user"):
     except Exception as e:
         print(f"❌ 查询任务失败: {e}")
         return []
+
+def submit_single_point_scf_dos(formula: str = "TiO2"):
+    """提交单点自洽+DOS计算（一步搞定）"""
+    print(f"⚡ 示例: 单点自洽+DOS计算 ({formula}) - 一步搞定")
+    
+    data = {
+        "user_id": "dos_example_user",
+        "formula": formula,
+        "calc_type": "SSE",  # 自旋轨道耦合
+        "kpoint_multiplier": 2.5,  # K点倍增因子
+        "precision": "Accurate",
+        "stable_only": True,
+        "selection_mode": "most_stable"
+    }
+    
+    try:
+        response = requests.post(
+            "http://localhost:9000/vasp/dos-calculation",
+            json=data,
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        print(f"✅ 单点自洽+DOS计算任务提交成功:")
+        print(f"   任务ID: {result['task_id']}")
+        print(f"   状态: {result['status']}")
+        print(f"   消息: {result['message']}")
+        print("⚡ 该任务特点：")
+        print("   • 一次VASP运行完成自洽场+DOS计算")
+        print("   • INCAR同时包含自洽场和DOS设置")
+        print("   • 无需分步操作，一步搞定")
+        print("📊 执行流程：")
+        print("   1. 从Materials Project下载CIF文件")
+        print("   2. 转换为POSCAR格式")
+        print("   3. 生成包含DOS设置的INCAR")
+        print("   4. 一次运行VASP得到CHG+CHGCAR+WAVECAR+DOSCAR")
+        
+        return result['task_id']
+        
+    except Exception as e:
+        print(f"❌ 提交失败: {e}")
+        return None
 
 def monitor_dos_task(task_id: str, user_id: str = "dos_example_user"):
     """监控态密度计算任务"""
@@ -183,6 +227,19 @@ def main():
     # 演示完整工作流程
     demonstrate_full_workflow()
     
+    print("\n" + "="*60)
+    print("⚡ 新功能演示：单点自洽+DOS计算（一步搞定）")
+    print("="*60)
+    
+    # 演示单点自洽+DOS计算
+    print("🚀 演示新功能：从化学式直接进行态密度计算")
+    print("(一次VASP运行完成自洽场+DOS)")
+    
+    single_dos_task_id = submit_single_point_scf_dos("TiO2")
+    if single_dos_task_id:
+        print(f"🎯 正在监控单点自洽+DOS任务: {single_dos_task_id[:8]}...")
+        monitor_dos_task(single_dos_task_id)
+    
     print("\n🎯 示例完成!")
     print("\n📚 关于态密度计算:")
     print("- 态密度(DOS)描述了材料中电子态在能量空间的分布")
@@ -190,6 +247,11 @@ def main():
     print("- LORBIT=11 可以计算轨道分辨态密度(PDOS)")
     print("- K点密度通常是结构优化的2-3倍以获得更精确的结果")
     print("- DOSCAR文件包含完整的态密度数据，可用于可视化分析")
+    print("\n💡 新功能：单点自洽+DOS计算")
+    print("- 无需预先完成自洽场计算，直接从化学式进行DOS计算")
+    print("- 一次VASP运行同时完成自洽场和DOS计算")
+    print("- INCAR文件同时包含自洽场和DOS参数设置")
+    print("- 特别适合快速获得材料的电子态密度信息")
 
 if __name__ == "__main__":
     main() 
