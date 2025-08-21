@@ -1,0 +1,11 @@
+#!/bin/sh
+#SBATCH -N 2 
+#SBATCH -n 56
+#SBATCH --ntasks-per-node=28
+#SBATCH --partition=normal3
+#SBATCH --output=%j.out  
+#SBATCH --error=%j.err   
+source /data/app/intel/bin/compilervars.sh intel64   
+export PATH=/data/app/vasp6.3.2/vasp.6.3.2/bin:$PATH
+ulimit -s unlimited
+mpirun -np $SLURM_NPROCS vasp_std >result.log
