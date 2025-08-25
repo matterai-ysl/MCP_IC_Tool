@@ -481,7 +481,7 @@ def test_scf_from_optimization():
     print("="*60)
     
     debugger = VASPAPIDebugger()
-    user_id = "workflow_test_user"
+    user_id = "test_user_001"
     
     if not debugger.test_connection():
         return None, None
@@ -495,7 +495,7 @@ def test_scf_from_optimization():
     #     stable_only=True,
     #     kpoint_density=20.0
     # )
-    opt_task_id = "7daaf464596d4adc9d4a82c9b5a1ba9b"
+    opt_task_id = "a300c6484f6a4e089802bad2781de478"
     if not opt_task_id:
         print("❌ 结构优化任务提交失败")
         return None, None
@@ -571,7 +571,7 @@ def test_dos_from_scf():
     print("="*60)
     
     debugger = VASPAPIDebugger()
-    user_id = "dos_test_user"
+    user_id = "workflow_test_user"
     
     if not debugger.test_connection():
         return None
@@ -579,13 +579,8 @@ def test_dos_from_scf():
     # 查找已完成的自洽场计算任务
     tasks = debugger.list_user_tasks(user_id)
     
-    completed_scf_task = None
-    if tasks:
-        for task in tasks:
-            if (task['task_type'] == 'scf_calculation' and 
-                task['status'] == 'completed'):
-                completed_scf_task = task['task_id']
-                break
+    completed_scf_task = "1283839e60d845feb5408e38c6a74fee"
+
     
     if completed_scf_task:
         print(f"📋 找到已完成的自洽场任务: {completed_scf_task[:8]}...")
@@ -750,21 +745,16 @@ def test_md_from_scf():
     print("="*60)
     
     debugger = VASPAPIDebugger()
-    user_id = "md_scf_user"
+    user_id = "workflow_test_user"
     
     if not debugger.test_connection():
         return None
     
     # 查找已完成的自洽场任务
     tasks = debugger.list_user_tasks(user_id)
-    completed_scf_task = None
+    completed_scf_task = "1283839e60d845feb5408e38c6a74fee"
     
-    if tasks:
-        for task in tasks:
-            if (task['task_type'] == 'scf_calculation' and 
-                task['status'] == 'completed'):
-                completed_scf_task = task['task_id']
-                break
+
     
     if not completed_scf_task:
         print("⚠️ 未找到已完成的自洽场任务，先提交一个:")
@@ -791,7 +781,7 @@ def test_md_from_scf():
     md_task_id = debugger.submit_md_calculation(
         user_id=user_id,
         scf_task_id=completed_scf_task,
-        calc_type="SSE",
+        calc_type="OXC",
         md_steps=500,
         temperature=300.0,
         time_step=1.0,
@@ -815,9 +805,9 @@ def test_md_from_scf():
 
 
 def test_single_point_md():
-    """测试单点自洽+MD计算（一步完成）"""
+    """测试纯MD计算（一步完成）"""
     print("\n" + "="*60)
-    print("⚡ 测试: 单点自洽+MD计算 (Li2O) - 一步搞定")
+    print("⚡ 测试: 纯MD计算 (Li2O) - 一步搞定")
     print("="*60)
     
     debugger = VASPAPIDebugger()
@@ -826,7 +816,7 @@ def test_single_point_md():
     if not debugger.test_connection():
         return None
     
-    # 直接从化学式进行单点自洽+MD计算（一次VASP运行完成）
+    # 直接从化学式进行纯MD计算（一次VASP运行完成）
     md_task_id = debugger.submit_md_calculation(
         user_id=user_id,
         formula="Li2O",
@@ -841,10 +831,10 @@ def test_single_point_md():
     )
     
     if md_task_id:
-        print("🎉 单点自洽+MD计算任务提交成功!")
+        print("🎉 纯MD计算任务提交成功!")
         print("⚡ 该任务特点：")
-        print("   • 一次VASP运行完成自洽场+MD计算")
-        print("   • INCAR同时包含自洽场和MD设置")
+        print("   • 一次VASP运行完成纯MD计算")
+        print("   • INCAR只包含MD设置，无需自洽场")
         print("   • 无需分步操作，一步搞定")
         print("📊 执行流程：")
         print("   1. 下载Li2O的CIF文件")
@@ -861,7 +851,7 @@ def test_single_point_md():
         
         return md_task_id
     else:
-        print("❌ 单点自洽+MD计算任务提交失败")
+        print("❌ 纯MD计算任务提交失败")
         return None
 
 
@@ -1016,7 +1006,7 @@ def interactive_mode():
         print("5. 基于自洽场结果进行态密度计算")
         print("6. 提交Li2O单点自洽+DOS计算 (一步搞定)")
         print("7. 基于自洽场结果进行分子动力学计算")
-        print("8. 提交Li2O单点自洽+MD计算 (一步搞定)")
+        print("8. 提交Li2O纯MD计算 (一步搞定)")
         print("9. 列出所有任务")
         print("a. 查询任务状态")
         print("b. 取消任务")
@@ -1186,7 +1176,7 @@ def interactive_mode():
             else:
                 print("❌ 没有找到已完成的自洽场计算任务")
         elif choice == "8":
-            # 单点自洽+MD计算
+            # 纯MD计算
             task_id = debugger.submit_md_calculation(
                 user_id="interactive_user",
                 formula="Li2O",
@@ -1199,8 +1189,8 @@ def interactive_mode():
                 stable_only=True
             )
             if task_id:
-                print(f"单点自洽+MD计算任务ID: {task_id}")
-                print("⚡ 该任务会在一次VASP运行中完成自洽场和MD计算")
+                print(f"纯MD计算任务ID: {task_id}")
+                print("⚡ 该任务会在一次VASP运行中完成纯MD计算，无需自洽场")
         elif choice == "9":
             user_id = input("输入用户ID (默认: interactive_user): ").strip() or "interactive_user"
             debugger.list_user_tasks(user_id)
@@ -1317,7 +1307,7 @@ if __name__ == "__main__":
    python debug_vasp_api.py single_dos  # 测试单点自洽+DOS计算（一步搞定）
    python debug_vasp_api.py full_workflow  # 测试完整工作流程（优化→自洽场→态密度）
    python debug_vasp_api.py md          # 测试分子动力学计算（基于自洽场结果）
-   python debug_vasp_api.py single_md   # 测试单点自洽+MD计算（一步搞定）
+   python debug_vasp_api.py single_md   # 测试纯MD计算（一步搞定）
    python debug_vasp_api.py full_md_workflow  # 测试完整MD工作流程（优化→自洽场→分子动力学）
    python debug_vasp_api.py error       # 测试错误处理
    python debug_vasp_api.py interactive # 交互式模式
@@ -1332,7 +1322,7 @@ if __name__ == "__main__":
    - 支持NVT、NVE、NPT三种系综
    - 可配置温度、时间步长、MD步数
    - 输出XDATCAR轨迹文件和OSZICAR能量文件
-   - 支持基于自洽场结果或单点自洽+MD一步完成
+   - 支持基于自洽场结果或纯MD一步完成
 
 5. 常见问题排查:
    - 连接失败: 检查端口转发和服务状态

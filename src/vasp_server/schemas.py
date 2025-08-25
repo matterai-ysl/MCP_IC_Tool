@@ -76,6 +76,7 @@ class TaskStatusResponse(BaseModel):
     external_job_id: Optional[str] = None
     process_id: Optional[int] = Field(None, description="VASP进程ID")
     error_message: Optional[str] = None
+    result_data: Optional[dict] = Field(None, description="详细的计算结果数据")
     created_at: str
     updated_at: str
 
@@ -86,6 +87,7 @@ class StructOptResult(BaseModel):
     final_forces: Optional[list] = Field(None, description="最终力矩阵")
     convergence: bool = Field(False, description="是否收敛")
     computation_time: Optional[float] = Field(None, description="计算耗时 (秒)")
+    html_analysis_report: Optional[str] = Field(None, description="可视化分析报告HTML文件路径")
 
 class SCFRequest(BaseModel):
     """自洽场计算请求模型"""

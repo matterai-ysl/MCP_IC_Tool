@@ -15,7 +15,9 @@ def get_vasp_config():
         "POSCAR_FILE": "POSCAR",
         "VASP_PATH": "/data/app/vasp/6.3.2-intel/bin/vasp_std",
         "PSEUDO_PATH": '/data/home/ysl9527/software/psudopotential',
-        "U_VALUES_JSON": "/data/home/ysl9527/software/u_values.json"
+        "U_VALUES_JSON": "/data/home/ysl9527/software/u_values.json",
+        "BADER_PATH": "/data/home/ysl9527/software/bader",
+        "CHGSUM_PL_PATH": "/data/home/ysl9527/software/chgsum.pl",
     }
     
     # ========================
@@ -37,102 +39,102 @@ def get_vasp_config():
     # INCAR 模板（集中管理）
     # ========================
     base_incars = {
-    "OXC": """
-    # 基础控制
-    SYSTEM = OPT
-    PREC = High
-    ENCUT = 520
-    ISTART = 0
-    ICHARG = 2
-    # 电子迭代
-    EDIFF = 1E-5
-    EDIFFG = -0.01
-    NELM = 100
-    NELMIN = 2
-    ALGO = Normal
-    ISMEAR = 0
-    SIGMA = 0.05
-    # 结构优化
-    IBRION = 2
-    NSW = 500
-    ISIF = 3
-    POTIM = 0.2
-    # 自旋极化与磁矩
-    ISPIN = 2
-    # 交换关联泛函
-    GGA = PE
-    # 并行与加速 
-    LREAL = Auto
-    # 输出控制
-    LWAVE  = .FALSE.
-    LCHARG = .FALSE.
-    """,
-    "ORC": """
-    # 基础控制
-    SYSTEM = OPT
-    PREC = High
-    ENCUT = 520
-    ISTART = 0
-    ICHARG = 2
-    # 电子迭代
-    EDIFF = 1E-5
-    EDIFFG = -0.01
-    NELM = 100
-    NELMIN = 2
-    ALGO = Normal
-    ISMEAR = 0
-    SIGMA = 0.05
-    # 结构优化
-    IBRION = 2
-    NSW = 500
-    ISIF = 3
-    POTIM = 0.2
-    # 自旋极化与磁矩
-    ISPIN = 2
-    # 交换关联泛函
-    GGA = PE
-    # 范德华力
-    IVDW = 12
-    VDW_RADIUS = 50.0
-    VDW_S8 = 0.7875
-    VDW_A1 = 0.4289
-    VDW_A2 = 4.4407
-    # 并行与加速 
-    LREAL = Auto
-    # 输出控制
-    LWAVE  = .FALSE.
-    LCHARG = .FALSE.
-    """
+"OXC": """
+# 基础控制
+SYSTEM = OPT
+PREC = High
+ENCUT = 520
+ISTART = 0
+ICHARG = 2
+# 电子迭代
+EDIFF = 1E-5
+EDIFFG = -0.01
+NELM = 100
+NELMIN = 2
+ALGO = Normal
+ISMEAR = 0
+SIGMA = 0.05
+# 结构优化
+IBRION = 2
+NSW = 500
+ISIF = 3
+POTIM = 0.2
+# 自旋极化与磁矩
+ISPIN = 2
+# 交换关联泛函
+GGA = PE
+# 并行与加速 
+LREAL = Auto
+# 输出控制
+LWAVE  = .FALSE.
+LCHARG = .FALSE.
+""",
+"ORC": """
+# 基础控制
+SYSTEM = OPT
+PREC = High
+ENCUT = 520
+ISTART = 0
+ICHARG = 2
+# 电子迭代
+EDIFF = 1E-5
+EDIFFG = -0.01
+NELM = 100
+NELMIN = 2
+ALGO = Normal
+ISMEAR = 0
+SIGMA = 0.05
+# 结构优化
+IBRION = 2
+NSW = 500
+ISIF = 3
+POTIM = 0.2
+# 自旋极化与磁矩
+ISPIN = 2
+# 交换关联泛函
+GGA = PE
+# 范德华力
+IVDW = 12
+VDW_RADIUS = 50.0
+VDW_S8 = 0.7875
+VDW_A1 = 0.4289
+VDW_A2 = 4.4407
+# 并行与加速 
+LREAL = Auto
+# 输出控制
+LWAVE  = .FALSE.
+LCHARG = .FALSE.
+"""
     }
     
     # ========================
     # 分子动力学 INCAR 模板
     # ========================
     md_incar_content = """
-    # 基础控制
-    SYSTEM = AIMD             # 体系标识
-    PREC = Medium             # 中等精度模式
-    ENCUT = 400               # 截断能（最大的ENMIN）
-    # 电子迭代
-    EDIFF = 1E-4              # 电子步收敛阈值
-    LREAL = Auto              # 实空间投影
-    ISMEAR = 0                # Gaussian 展宽
-    SIGMA = 0.0407            # 展宽宽度，K*0.086*10-3
-    ALGO = Fast               # 快速算法
-    ISYM = 0                  # 关闭对称性（MD 必需）
-    # 分子动力学控制
-    IBRION = 0                # MD 模式（自由动力学）
-    NSW = 30000               # MD 总步数
-    POTIM = 0.5               # 时间步长（单位 fs）
-    TEBEG = 300               # 初始温度（单位 K）
-    TEEND = 300               # 最终温度（单位 K）
-    SMASS = 2                 # Nose-Hoover 热浴（SMASS=2 对应固定温度）
-    # 输出控制
-    LCHARG = .FALSE.          # 不输出 CHGCAR（节省存储）
-    LWAVE = .FALSE.           # 不输出 WAVECAR（若需续算则置为.TRUE.）
-    NWRITE = 1                # 输出详细程度（1=默认，2=详细）
-    # 收敛与性能
-    NELMIN = 4                # 最小电子步数（防止过早终止）
+# 基础控制
+SYSTEM = AIMD             # 体系标识
+PREC = Medium             # 中等精度模式
+ENCUT = 400               # 截断能（最大的ENMIN）
+# 电子迭代
+EDIFF = 1E-4              # 电子步收敛阈值
+LREAL = Auto              # 实空间投影
+ISMEAR = 0                # Gaussian 展宽
+SIGMA = 0.0407            # 展宽宽度，K*0.086*10-3
+ALGO = Fast               # 快速算法
+ISYM = 0                  # 关闭对称性（MD 必需）
+# 分子动力学控制
+IBRION = 0                # MD 模式（自由动力学）
+NSW = 30000               # MD 总步数
+POTIM = 0.5               # 时间步长（单位 fs）
+TEBEG = 300               # 初始温度（单位 K）
+TEEND = 300               # 最终温度（单位 K）
+SMASS = 2                 # Nose-Hoover 热浴（SMASS=2 对应固定温度）
+# 输出控制
+LCHARG = .FALSE.          # 不输出 CHGCAR（节省存储）
+LWAVE = .FALSE.           # 不输出 WAVECAR（若需续算则置为.TRUE.）
+NWRITE = 1                # 输出详细程度（1=默认，2=详细）
+# 收敛与性能
+NELMIN = 4                # 最小电子步数（防止过早终止）
     """
     
     # ========================

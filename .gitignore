@@ -1,0 +1,29 @@
+# 忽略名为 node_modules 的文件夹（所有位置）
+DFT/
+
+# 忽略所有 build 文件夹
+dos_test/
+scf_test/
+
+# 忽略 Python 虚拟环境
+venv/
+env/
+.venv/
+
+# 忽略 IDE 或编辑器生成的文件夹
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+.cache/
+
+# 忽略数据或模型文件夹
+data/
+models/
+datasets/
+
+# 忽略日志和临时文件夹
+logs/
+temp/
+tmp/

@@ -94,6 +94,8 @@ class TaskManager:
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
+                        # 存储详细的结果数据
+                        task.result_data = self._prepare_result_data(result)  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
@@ -127,6 +129,8 @@ class TaskManager:
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
+                        # 存储详细的结果数据
+                        task.result_data = self._prepare_result_data(result)  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
@@ -160,6 +164,8 @@ class TaskManager:
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
+                        # 存储详细的结果数据
+                        task.result_data = self._prepare_result_data(result)  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
@@ -193,6 +199,8 @@ class TaskManager:
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
+                        # 存储详细的结果数据
+                        task.result_data = self._prepare_result_data(result)  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
@@ -269,4 +277,33 @@ class TaskManager:
         try:
             return list(db.query(Task).filter(Task.user_id == user_id).order_by(Task.created_at.desc()).all())
         finally:
-            db.close() 
+            db.close()
+    
+    def _prepare_result_data(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """准备要存储到数据库的结果数据"""
+        # 创建一个精简的结果数据副本，避免存储过大的数据
+        prepared_data = {
+            'success': result.get('success', False),
+            'convergence': result.get('convergence', False),
+            'energy': result.get('energy'),
+            'final_forces': result.get('final_forces'),
+            'optimized_structure': result.get('optimized_structure'),
+            'computation_time': result.get('computation_time'),
+            'process_id': result.get('process_id'),
+            'work_directory': result.get('work_directory'),
+            'html_analysis_report': result.get('html_analysis_report')
+        }
+        
+        # 如果有分析数据，选择性存储关键信息
+        if result.get('analysis_data'):
+            analysis_data = result['analysis_data']
+            prepared_data['analysis_summary'] = {
+                'convergence_analysis': analysis_data.get('convergence_analysis'),
+                'final_results': analysis_data.get('final_results'),
+                'optimization_process': analysis_data.get('optimization_process'),
+                'task_info': analysis_data.get('task_info'),
+                'file_info': analysis_data.get('file_info'),
+                'calculation_settings': analysis_data.get('calculation_settings')
+            }
+        
+        return prepared_data 

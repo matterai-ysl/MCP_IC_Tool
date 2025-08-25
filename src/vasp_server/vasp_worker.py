@@ -218,7 +218,7 @@ class VaspWorker:
                     await progress_callback(30, "生成分子动力学VASP输入文件...")
                     await self._generate_md_inputs(work_dir, params, md_files)
                 else:
-                    await progress_callback(25, "单点自洽+MD输入文件已准备完成")
+                    await progress_callback(25, "纯MD输入文件已准备完成")
             else:
                 if params.get('scf_task_id'):
                     await self._generate_md_inputs(work_dir, params, md_files)
@@ -228,7 +228,7 @@ class VaspWorker:
                 if params.get('scf_task_id'):
                     await progress_callback(40, "开始VASP分子动力学计算...")
                 else:
-                    await progress_callback(30, "开始单点自洽+MD计算...")
+                    await progress_callback(30, "开始纯MD计算...")
             result = await self._run_vasp_calculation(work_dir, progress_callback)
             
             # 4. 分析MD结果
@@ -445,7 +445,7 @@ class VaspWorker:
             return copied_files
             
         elif params.get('formula'):
-            # 从化学式进行单点自洽+MD计算（一步完成）
+            # 从化学式进行纯MD计算（一步完成）
             if progress_callback:
                 await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
             
@@ -455,15 +455,15 @@ class VaspWorker:
                 raise Exception("无法获取CIF文件")
             poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
             
-            # 生成单点自洽+MD的输入文件
+            # 生成纯MD的输入文件
             if progress_callback:
-                await progress_callback(20, "准备单点自洽+MD计算文件...")
+                await progress_callback(20, "准备纯MD计算文件...")
             await self._prepare_single_point_md_files(work_dir, params)
             
             return {"POSCAR": str(poscar_path)}
             
         elif params.get('cif_url'):
-            # 从CIF URL进行单点自洽+MD计算（一步完成）
+            # 从CIF URL进行纯MD计算（一步完成）
             if progress_callback:
                 await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
             
@@ -473,9 +473,9 @@ class VaspWorker:
                 raise Exception("无法获取CIF文件")
             poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
             
-            # 生成单点自洽+MD的输入文件
+            # 生成纯MD的输入文件
             if progress_callback:
-                await progress_callback(20, "准备单点自洽+MD计算文件...")
+                await progress_callback(20, "准备纯MD计算文件...")
             await self._prepare_single_point_md_files(work_dir, params)
             
             return {"POSCAR": str(poscar_path)}
@@ -484,7 +484,7 @@ class VaspWorker:
             raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
     
     async def _prepare_single_point_md_files(self, work_dir: Path, params: Dict[str, Any]):
-        """准备单点自洽+MD计算的输入文件"""
+        """准备纯MD计算的输入文件"""
         from .base import generate_potcar
         
         # 1. 生成POTCAR
@@ -493,10 +493,10 @@ class VaspWorker:
         # 2. 生成固定的MD KPOINTS (1 1 1)
         await self._generate_md_kpoints(work_dir)
         
-        # 3. 生成单点自洽+MD的INCAR
+        # 3. 生成纯MD的INCAR
         await self._generate_single_point_md_incar(work_dir, params)
         
-        print("单点自洽+MD输入文件已准备完成")
+        print("纯MD输入文件已准备完成")
     
     async def _generate_md_inputs(self, work_dir: Path, params: Dict[str, Any], md_files: Dict[str, str]):
         """生成分子动力学VASP输入文件"""
@@ -513,11 +513,11 @@ class VaspWorker:
         
         # MD计算使用固定的1x1x1 K点网格
         kpoints_content = """Automatic mesh
-0
-Gamma
-1 1 1
-0.0 0.0 0.0
-"""
+        0
+        Gamma
+        1 1 1
+        0.0 0.0 0.0
+        """
         
         with open(kpoints_path, 'w') as f:
             f.write(kpoints_content)
@@ -536,40 +536,40 @@ Gamma
         calc_type = self._get_calc_type_from_params(params)
         
         incar_content = f"""SYSTEM = MD-{calc_type}
-PREC = {precision}
-ISMEAR = 0
-SIGMA = 0.1
-IBRION = 0
-NSW = {md_steps}
-POTIM = {time_step}
-TEBEG = {temperature}
-TEEND = {temperature}
-SMASS = 0
-NBLOCK = 1
-ISYM = 0
-LCHARG = .FALSE.
-LWAVE = .FALSE.
-"""
+        PREC = {precision}
+        ISMEAR = 0
+        SIGMA = 0.1
+        IBRION = 0
+        NSW = {md_steps}
+        POTIM = {time_step}
+        TEBEG = {temperature}
+        TEEND = {temperature}
+        SMASS = 0
+        NBLOCK = 1
+        ISYM = 0
+        LCHARG = .FALSE.
+        LWAVE = .FALSE.
+        """
 
         # 根据系综类型添加特定设置
         if ensemble.upper() == 'NVT':
             incar_content += """
-# NVT系综设置
-MDALGO = 2
-ANDERSEN_PROB = 0.1
-"""
+        # NVT系综设置
+        MDALGO = 2
+        ANDERSEN_PROB = 0.1
+        """
         elif ensemble.upper() == 'NVE':
             incar_content += """
-# NVE系综设置  
-MDALGO = 1
-"""
+        # NVE系综设置  
+        MDALGO = 1
+        """
         elif ensemble.upper() == 'NPT':
             incar_content += """
-# NPT系综设置
-MDALGO = 3
-PSTRESS = 0.0
-LANGEVIN_GAMMA = 10.0
-"""
+        # NPT系综设置
+        MDALGO = 3
+        PSTRESS = 0.0
+        LANGEVIN_GAMMA = 10.0
+        """
         
         # 写入INCAR文件
         incar_path = work_dir / "INCAR"
@@ -579,75 +579,11 @@ LANGEVIN_GAMMA = 10.0
         print(f"MD INCAR已生成于 {incar_path} ({ensemble}系综, {md_steps}步, {temperature}K)")
     
     async def _generate_single_point_md_incar(self, work_dir: Path, params: Dict[str, Any]):
-        """生成单点自洽+MD的INCAR文件"""
-        from .base import generate_incar
+        """生成纯MD的INCAR文件（直接进行分子动力学计算，无需自洽场）"""
         
-        # 获取基础参数
-        calc_type = self._get_calc_type_from_params(params)
-        precision = params.get('precision', 'Normal')
-        md_steps = params.get('md_steps', 1000)
-        temperature = params.get('temperature', 300.0)
-        time_step = params.get('time_step', 1.0)
-        ensemble = params.get('ensemble', 'NVT')
-        
-        # 先生成基础INCAR（用于自洽场设置）
-        generate_incar(str(work_dir), calc_type)
-        
-        # 读取并修改为单点自洽+MD设置
-        incar_path = work_dir / "INCAR"
-        with open(incar_path, 'r') as f:
-            lines = f.readlines()
-        
-        new_lines = []
-        
-        for line in lines:
-            stripped = line.strip().upper()
-            
-            # 修改基础设置
-            if stripped.startswith("SYSTEM"):
-                new_lines.append(f"SYSTEM = Single-point SCF+MD-{calc_type}\n")
-            elif stripped.startswith("PREC"):
-                new_lines.append(f"PREC = {precision}\n")
-            elif stripped.startswith("NSW"):
-                new_lines.append(f"NSW = {md_steps}\n")  # MD步数
-            elif stripped.startswith("IBRION"):
-                new_lines.append("IBRION = 0\n")  # MD计算
-            elif stripped.startswith("LWAVE"):
-                new_lines.append("LWAVE = .FALSE.\n")  # MD不需要保存波函数
-            elif stripped.startswith("LCHARG"):
-                new_lines.append("LCHARG = .FALSE.\n")  # MD不需要保存电荷密度
-            elif stripped.startswith("ISMEAR"):
-                new_lines.append("ISMEAR = 0\n")  # MD推荐高斯展宽
-            elif stripped.startswith("SIGMA"):
-                new_lines.append("SIGMA = 0.1\n")  # MD展宽参数
-            else:
-                new_lines.append(line)
-        
-        # 添加MD专用设置
-        new_lines.append("\n# 分子动力学设置\n")
-        new_lines.append(f"POTIM = {time_step}\n")    # 时间步长
-        new_lines.append(f"TEBEG = {temperature}\n")  # 初始温度
-        new_lines.append(f"TEEND = {temperature}\n")  # 结束温度
-        new_lines.append("SMASS = 0\n")               # 热浴质量
-        new_lines.append("NBLOCK = 1\n")              # 输出频率
-        new_lines.append("ISYM = 0\n")                # 关闭对称性
-        
-        # 根据系综类型添加设置
-        if ensemble.upper() == 'NVT':
-            new_lines.append("MDALGO = 2\n")          # NVT系综
-            new_lines.append("ANDERSEN_PROB = 0.1\n") # Andersen热浴
-        elif ensemble.upper() == 'NVE':
-            new_lines.append("MDALGO = 1\n")          # NVE系综
-        elif ensemble.upper() == 'NPT':
-            new_lines.append("MDALGO = 3\n")          # NPT系综
-            new_lines.append("PSTRESS = 0.0\n")       # 目标压力
-            new_lines.append("LANGEVIN_GAMMA = 10.0\n") # Langevin参数
-        
-        # 写入INCAR文件
-        with open(incar_path, 'w') as f:
-            f.writelines(new_lines)
-        
-        print(f"单点自洽+MD INCAR已生成于 {incar_path}")
+        # 直接调用纯MD的INCAR生成方法
+        await self._generate_md_incar(work_dir, params)
+        print("纯MD INCAR已生成（无需自洽场计算）")
     
     async def _analyze_md_results(self, work_dir: Path, run_result: Dict[str, Any]) -> Dict[str, Any]:
         """分析分子动力学计算结果"""
@@ -1050,7 +986,9 @@ LANGEVIN_GAMMA = 10.0
             new_lines.append("NELM = 200\n")   # 更多电子步数
             new_lines.append("ISMEAR = 0\n")   # Gaussian展宽
             new_lines.append("SIGMA = 0.05\n") # 展宽参数
-        
+            new_lines.append("LAECHG = .TRUE.\n") # 保存电荷密度
+            new_lines.append("LELF = .TRUE.\n") 
+            new_lines.append("LORBIT = 11\n") 
         # 写回文件
         with open(incar_path, 'w') as f:
             f.writelines(new_lines)
@@ -1185,72 +1123,175 @@ LANGEVIN_GAMMA = 10.0
     
     async def _run_vasp_calculation(self, work_dir: Path, progress_callback=None) -> Dict[str, Any]:
         """运行VASP计算"""
+        import re
         start_time = time.time()
         
         # 提交作业
         if progress_callback:
             await progress_callback(35, "提交VASP作业...")
         
-        # 使用SLURM作业调度运行VASP
-        vasp_path = get_path_config()["VASP_PATH"]
-        
-        # SLURM作业调度参数（来自vasp.lsf配置）
+        # SLURM作业调度参数
         nodes = 2                    # 节点数
         total_tasks = 56             # 总任务数
         tasks_per_node = 28          # 每节点任务数
         
-        shell_command = f"""
-        source /etc/profile.d/modules.sh
-        module load vasp/6.3.2-intel
-        srun -N {nodes} -n {total_tasks} --ntasks-per-node={tasks_per_node} {vasp_path}
+        script = f"""#!/bin/bash
+#SBATCH --job-name={work_dir.name}
+#SBATCH --partition=p1
+#SBATCH -N {nodes}
+#SBATCH -n {total_tasks}
+#SBATCH --ntasks-per-node={tasks_per_node}
+#SBATCH --cpus-per-task=1
+#SBATCH --time=24:00:00
+#SBATCH --output=%j.out
+#SBATCH --error=%j.err
+
+module load vasp/6.3.2-intel
+source /data/app/intel/oneapi-2023.2/setvars.sh >/dev/null 2>&1
+ulimit -s unlimited
+ulimit -l unlimited
+
+echo "=== 作业信息 ==="
+echo "作业ID: $SLURM_JOB_ID"
+echo "分区: $SLURM_JOB_PARTITION"
+echo "节点数: $SLURM_JOB_NUM_NODES"
+echo "总任务数: $SLURM_NPROCS"
+echo "每节点任务数: $SLURM_NTASKS_PER_NODE"
+echo "节点列表: $SLURM_JOB_NODELIST"
+
+echo "=== 开始VASP计算 ==="
+mpirun -np $SLURM_NPROCS vasp_std>result.log 2>&1
+echo "VASP计算完成
         """
-        
+
+        # 使用.sh扩展名
+        script_file = work_dir / "vasp_job.sh"
+        with open(script_file, "w") as f:
+            f.write(script)
+
         try:
-            # 运行VASP
-            process = await asyncio.create_subprocess_shell(
-                shell_command,
+            # 提交SLURM作业
+            submit_process = await asyncio.create_subprocess_shell(
+                f"sbatch {script_file.name}",
                 cwd=str(work_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            pid = process.pid
-            print(f"🔍 VASP进程ID: {pid}")
             
-            # 通过特殊回调传递PID
+            # 等待提交结果
+            submit_stdout, submit_stderr = await submit_process.communicate()
+            
+            if submit_process.returncode != 0:
+                error_msg = f"SLURM作业提交失败，返回码: {submit_process.returncode}\n"
+                error_msg += f"错误信息: {submit_stderr.decode()}"
+                raise Exception(error_msg)
+            
+            # 解析SLURM作业ID
+            output = submit_stdout.decode().strip()
+            print(f"✅ 作业提交成功: {output}")
+            
+            job_match = re.search(r'(\d+)', output)
+            if not job_match:
+                raise Exception(f"无法解析SLURM作业ID: {output}")
+            
+            slurm_job_id = job_match.group(1)
+            print(f"🆔 SLURM作业ID: {slurm_job_id}")
+            
+            # 通过回调传递作业ID
             if progress_callback:
-                await progress_callback(35, f"VASP进程已启动，PID: {pid}", pid=pid)
+                await progress_callback(40, f"VASP作业已提交，作业ID: {slurm_job_id}", pid=slurm_job_id)
             
-            # 等待计算完成，同时更新进度
-            progress = 36
-            while process.returncode is None:
-                if progress_callback:
-                    await progress_callback(min(progress, 90), "VASP计算进行中...")
-                
-                await asyncio.sleep(10)  # 每10秒检查一次
-                progress = min(progress + 2, 90)
-                
-                # 检查进程状态
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+            # 监控作业状态
+            progress = 45
+            job_completed = False
             
-            stdout, stderr = await process.communicate()
+            while not job_completed:
+                # 检查作业状态
+                status_process = await asyncio.create_subprocess_shell(
+                    f"squeue -j {slurm_job_id} --noheader --format='%T'",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                status_stdout, status_stderr = await status_process.communicate()
+                
+                if status_process.returncode == 0:
+                    status = status_stdout.decode().strip()
+                    
+                    if status == "":
+                        # 作业不在队列中，可能已完成
+                        job_completed = True
+                        print("✅ 作业已完成（不在队列中）")
+                    elif status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"]:
+                        job_completed = True
+                        print(f"✅ 作业状态: {status}")
+                        
+                        if status != "COMPLETED":
+                            # 检查错误日志
+                            error_files = list(work_dir.glob("*.err"))
+                            error_msg = f"作业以状态 {status} 结束"
+                            if error_files:
+                                try:
+                                    with open(error_files[0], 'r') as f:
+                                        error_content = f.read()
+                                    if error_content.strip():
+                                        error_msg += f"\n错误日志:\n{error_content}"
+                                except:
+                                    pass
+                            raise Exception(error_msg)
+                    else:
+                        # 作业仍在运行
+                        status_msg = {
+                            "PENDING": "排队中",
+                            "RUNNING": "计算中", 
+                            "CONFIGURING": "配置中"
+                        }.get(status, f"状态: {status}")
+                        
+                        if progress_callback:
+                            await progress_callback(min(progress, 90), f"VASP{status_msg}...")
+                        
+                        print(f"🔄 作业状态: {status}")
+                else:
+                    # 查询失败，可能作业已完成
+                    print("⚠️  无法查询作业状态，检查是否已完成")
+                    job_completed = True
+                
+                if not job_completed:
+                    await asyncio.sleep(30)  # 每30秒检查一次
+                    progress = min(progress + 3, 90)
+            
+            # 检查输出文件
+            outcar_file = work_dir / "OUTCAR"
+            if not outcar_file.exists():
+                # 查找输出文件
+                output_files = list(work_dir.glob("*.out"))
+                error_msg = "VASP计算可能失败，未找到OUTCAR文件"
+                if output_files:
+                    try:
+                        with open(output_files[0], 'r') as f:
+                            output_content = f.read()
+                        error_msg += f"\n作业输出:\n{output_content}"
+                    except:
+                        pass
+                raise Exception(error_msg)
+            
+            # 读取结果
+            result_log = ""
+            result_log_file = work_dir / "result.log"
+            if result_log_file.exists():
+                with open(result_log_file, 'r') as f:
+                    result_log = f.read()
             
             end_time = time.time()
             computation_time = end_time - start_time
             
-            if process.returncode != 0:
-                error_msg = f"VASP执行失败，返回码: {process.returncode}\n"
-                error_msg += f"标准错误输出: {stderr.decode()}"
-                raise Exception(error_msg)
-            
             return {
                 'success': True,
                 'computation_time': computation_time,
-                'stdout': stdout.decode(),
-                'stderr': stderr.decode(),
-                'process_id': pid
+                'stdout': result_log,
+                'stderr': '',
+                'slurm_job_id': slurm_job_id,
+                'output_files': [str(f) for f in work_dir.glob("*") if f.is_file()]
             }
             
         except Exception as e:
@@ -1288,7 +1329,23 @@ LANGEVIN_GAMMA = 10.0
             if contcar_path.exists():
                 optimized_structure = str(contcar_path)
             
-            return {
+            # 生成可视化分析报告（仅对结构优化任务）
+            html_report_path = None
+            analysis_data = None
+            try:
+                from .optimization_analyzer import generate_optimization_report, OUTCARAnalyzer
+                if outcar_path.exists():
+                    # 生成分析数据
+                    analyzer = OUTCARAnalyzer(str(work_dir), task_id="optimization")
+                    analysis_data = analyzer.analyze()
+                    
+                    # 生成HTML报告
+                    html_report_path = generate_optimization_report(str(work_dir), "optimization")
+                    print(f"📊 结构优化分析报告已生成: {html_report_path}")
+            except Exception as e:
+                print(f"⚠️ 生成可视化分析报告失败: {e}")
+            
+            result = {
                 'success': True,
                 'convergence': convergence,
                 'energy': energy,
@@ -1298,6 +1355,16 @@ LANGEVIN_GAMMA = 10.0
                 'process_id': vasp_result.get('process_id'),
                 'work_directory': str(work_dir)
             }
+            
+            # 如果生成了HTML报告，添加到结果中
+            if html_report_path:
+                result['html_analysis_report'] = html_report_path
+            
+            # 如果生成了分析数据，添加到结果中
+            if analysis_data:
+                result['analysis_data'] = analysis_data
+            
+            return result
             
         except Exception as e:
             return {
@@ -1360,6 +1427,29 @@ LANGEVIN_GAMMA = 10.0
             return forces if forces else None
         except Exception:
             return None
+
+    def _run_bader_analysis(self, work_dir: Path):
+        """运行Bader电荷分析"""
+        CHGSUM_PL_PATH = get_path_config()["vasp_path"]["chgsum_pl"]
+        BADER_PATH = get_path_config()["vasp_path"]["bader"]
+        for f in ["AECCAR0", "AECCAR2", "CHGCAR"]:
+            if not os.path.exists(os.path.join(work_dir, f)): 
+                raise Exception("  - 错误: 未找到Bader分析所需文件 {}。".format(f))
+        chgsum_cmd = ["perl", CHGSUM_PL_PATH, "AECCAR0", "AECCAR2"]
+        result = subprocess.run(
+            chgsum_cmd, cwd=work_dir, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT, text=True, check=True
+        )
+        if result.returncode != 0:
+            raise Exception("  - 错误: 生成 CHGCAR_sum 文件失败。")
+        if not os.path.exists(os.path.join(work_dir, "CHGCAR_sum")): 
+            raise Exception("  - 错误: 未生成 CHGCAR_sum 文件。")
+        bader_cmd = [BADER_PATH, "CHGCAR", "-ref", "CHGCAR_sum"]
+        result = subprocess.run(
+            bader_cmd, cwd=work_dir, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT, text=True, check=True
+        )
+        if result.returncode != 0:
+            raise Exception("  - 错误: Bader分析失败。")
+        return True
     
     async def _analyze_scf_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
         """分析自洽场计算结果"""
@@ -1379,12 +1469,29 @@ LANGEVIN_GAMMA = 10.0
             
             # 提取电子步数
             electronic_steps = self._extract_electronic_steps(outcar_path)
+            # 运行Bader电荷分析
+            self._run_bader_analysis(work_dir)
+            # 生成可视化分析报告（使用新的SCF分析器）
+            html_report_path = None
+            analysis_data = None
+            try:
+                from .scf_analyzer import generate_scf_report, SCFAnalyzer
+                if outcar_path.exists():
+                    # 生成分析数据
+                    analyzer = SCFAnalyzer(str(work_dir), task_id="scf")
+                    analysis_data = analyzer.analyze()
+                    
+                    # 生成HTML报告
+                    html_report_path = generate_scf_report(str(work_dir), "scf")
+                    print(f"📊 SCF计算分析报告已生成: {html_report_path}")
+            except Exception as e:
+                print(f"⚠️ 生成SCF可视化分析报告失败: {e}")
             
             # SCF结构文件路径
             poscar_path = work_dir / "POSCAR"
             scf_structure = str(poscar_path) if poscar_path.exists() else None
             
-            return {
+            result = {
                 'success': True,
                 'convergence': convergence,
                 'total_energy': total_energy,
@@ -1396,6 +1503,16 @@ LANGEVIN_GAMMA = 10.0
                 'process_id': vasp_result.get('process_id'),
                 'work_directory': str(work_dir)
             }
+            
+            # 如果生成了HTML报告，添加到结果中
+            if html_report_path:
+                result['html_analysis_report'] = html_report_path
+            
+            # 如果生成了分析数据，添加到结果中
+            if analysis_data:
+                result['analysis_data'] = analysis_data
+            
+            return result
             
         except Exception as e:
             return {
@@ -1485,11 +1602,27 @@ LANGEVIN_GAMMA = 10.0
                 dos_data = self._extract_dos_data(doscar_path)
                 kpoints_used = self._extract_kpoints_info(work_dir / "KPOINTS")
             
+            # 生成可视化分析报告（使用SCF分析器，因为DOS计算也包含SCF过程）
+            html_report_path = None
+            analysis_data = None
+            try:
+                from .scf_analyzer import generate_scf_report, SCFAnalyzer
+                if outcar_path.exists():
+                    # 生成分析数据
+                    analyzer = SCFAnalyzer(str(work_dir), task_id="dos")
+                    analysis_data = analyzer.analyze()
+                    
+                    # 生成HTML报告
+                    html_report_path = generate_scf_report(str(work_dir), "dos")
+                    print(f"📊 DOS计算分析报告已生成: {html_report_path}")
+            except Exception as e:
+                print(f"⚠️ 生成DOS可视化分析报告失败: {e}")
+            
             # DOS结构文件路径
             poscar_path = work_dir / "POSCAR"
             dos_structure = str(poscar_path) if poscar_path.exists() else None
             
-            return {
+            result = {
                 'success': True,
                 'convergence': convergence,
                 'total_energy': total_energy,
@@ -1503,6 +1636,16 @@ LANGEVIN_GAMMA = 10.0
                 'process_id': vasp_result.get('process_id'),
                 'work_directory': str(work_dir)
             }
+            
+            # 如果生成了HTML报告，添加到结果中
+            if html_report_path:
+                result['html_analysis_report'] = html_report_path
+            
+            # 如果生成了分析数据，添加到结果中
+            if analysis_data:
+                result['analysis_data'] = analysis_data
+            
+            return result
             
         except Exception as e:
             return {

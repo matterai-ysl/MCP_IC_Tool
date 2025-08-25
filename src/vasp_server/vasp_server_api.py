@@ -293,8 +293,8 @@ async def submit_md_calculation(request: MDRequest):
     提交分子动力学计算任务
     
     支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件（单点自洽+MD）
-    2. CIF URL：直接从指定URL下载CIF文件（单点自洽+MD）
+    1. 化学式：从Materials Project数据库搜索和下载CIF文件（纯MD计算）
+    2. CIF URL：直接从指定URL下载CIF文件（纯MD计算）
     3. 自洽场任务ID：基于已完成的自洽场计算任务结果
     
     Returns:
@@ -369,10 +369,10 @@ async def submit_md_calculation(request: MDRequest):
             calc_mode = "分子动力学计算"
         elif request.formula:
             input_source = "化学式"
-            calc_mode = "单点自洽+MD计算"
+            calc_mode = "纯MD计算"
         else:
             input_source = "CIF URL"
-            calc_mode = "单点自洽+MD计算"
+            calc_mode = "纯MD计算"
         
         return MDResponse(
             task_id=task_id,
@@ -415,6 +415,7 @@ async def get_task_status(task_id: str, user_id: str):
             external_job_id=task.external_job_id,  # type: ignore
             process_id=task.process_id,  # type: ignore
             error_message=task.error_message,  # type: ignore
+            result_data=task.result_data,  # type: ignore
             created_at=task.created_at.isoformat() if task.created_at else "",  # type: ignore
             updated_at=task.updated_at.isoformat() if task.updated_at else ""  # type: ignore
         )
@@ -477,6 +478,7 @@ async def list_user_tasks(user_id: str):
                 external_job_id=task.external_job_id,  # type: ignore
                 process_id=task.process_id,  # type: ignore
                 error_message=task.error_message,  # type: ignore
+                result_data=task.result_data,  # type: ignore
                 created_at=task.created_at.isoformat() if task.created_at else "",  # type: ignore
                 updated_at=task.updated_at.isoformat() if task.updated_at else ""  # type: ignore
             )

@@ -15,6 +15,7 @@ class Task(Base):
     progress = Column(Integer, nullable=False, default=0)
     params = Column(JSON, nullable=True)
     result_path = Column(String, nullable=True)
+    result_data = Column(JSON, nullable=True)  # 存储分析结果数据
     external_job_id = Column(String, nullable=True)
     process_id = Column(Integer, nullable=True)  # 进程ID
     error_message = Column(Text, nullable=True)
