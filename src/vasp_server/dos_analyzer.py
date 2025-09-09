@@ -33,6 +33,7 @@ from pymatgen.electronic_structure.plotter import DosPlotter, BSPlotter
 from pymatgen.electronic_structure.bandstructure import BandStructureSymmLine
 from pymatgen.analysis.local_env import CrystalNN
 from pymatgen.analysis.bond_valence import BVAnalyzer
+from .bandgap_analyzer import analyze_bandgap
 
 # 设置中文字体和日志
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
@@ -397,7 +398,7 @@ class PyMatGenDOSAnalyzer:
             valences = bv_analyzer.get_valences(structure)
             # 确保valences是可序列化的
             if hasattr(valences, 'tolist'):
-                valences_list = valences.tolist()
+                valences_list = valences.tolist() #type: ignore
             else:
                 valences_list = list(valences)
             structure_analysis['bond_valence_analysis'] = {
@@ -457,18 +458,13 @@ class PyMatGenDOSAnalyzer:
         is_metal = gap_info['is_metal']
         material_type = 'metal' if is_metal else ('semiconductor' if band_gap < 3.0 else 'insulator')
         
-        # 简化的带隙类型判断
-        if gap_info['cbm'] is not None and gap_info['vbm'] is not None:
-            gap_type = 'direct' if abs(gap_info['cbm'] - gap_info['vbm'] - band_gap) < 0.01 else 'indirect'
-        else:
-            gap_type = 'unknown'
-        
+
+
         dos_analysis = {
             'fermi_energy': fermi_energy,
             'band_gap': band_gap,
             'cbm_energy': gap_info['cbm'],
             'vbm_energy': gap_info['vbm'],
-            'gap_type': gap_type,
             'material_type': material_type,
             'is_metal': is_metal,
             'is_spin_polarized': self.is_spin_polarized,
@@ -499,45 +495,29 @@ class PyMatGenDOSAnalyzer:
             # 尝试不同的方法获取能带结构
             band_structure = None
             
-            # 方法1: 尝试获取沿对称线的能带结构
+            # 尝试获取沿对称线的能带结构(用于画图)
             try:
                 band_structure = self.vasprun.get_band_structure(line_mode=True)
                 if band_structure:
                     logger.info("获取了沿对称线的能带结构 (BandStructureSymmLine)")
             except Exception as e:
                 logger.debug(f"沿对称线模式失败: {e}")
-            
-            # 方法2: 如果方法1失败，尝试标准方法
-            if not band_structure:
-                try:
-                    band_structure = self.vasprun.get_band_structure()
-                    if band_structure:
-                        logger.info(f"获取了能带结构，类型: {type(band_structure).__name__}")
-                except Exception as e:
-                    logger.debug(f"标准方法失败: {e}")
-            
+
+            # 使用bandgap_analyzer.py计算带隙信息
+            path = self.vasprun_path
+            results = analyze_bandgap(str(path))['global_bandgap']
+            fundamental_gap = results['fundamental_gap']
+            fundamental_type = results['fundamental_type']
+            direct_gap = results['direct_gap']
+            indirect_gap = results['indirect_gap']
+            print(results)
+
             if band_structure:
                 # 使用DOS数据计算更准确的带隙信息
                 gap_info_from_dos = self.get_band_gap_info()
-                
+                print("gap_info_from_dos:",gap_info_from_dos)
                 # 尝试从能带结构获取信息（作为参考）
-                try:
-                    bs_gap_info = band_structure.get_band_gap()
-                    bs_is_metal = band_structure.is_metal()
-                    bs_direct_gap = 0.0
-                    try:
-                        bs_direct_gap_result = band_structure.get_direct_band_gap()
-                        if isinstance(bs_direct_gap_result, dict):
-                            bs_direct_gap = bs_direct_gap_result.get('energy', 0.0)
-                        elif isinstance(bs_direct_gap_result, (int, float)):
-                            bs_direct_gap = float(bs_direct_gap_result)
-                    except:
-                        bs_direct_gap = 0.0
-                except Exception as e:
-                    logger.warning(f"从能带结构获取信息失败: {e}")
-                    bs_gap_info = None
-                    bs_is_metal = None
-                    bs_direct_gap = 0.0
+
                 
                 # 优先使用DOS计算的结果，能带结构作为补充
                 band_analysis = {
@@ -546,17 +526,14 @@ class PyMatGenDOSAnalyzer:
                     # 使用DOS计算的更准确结果
                     'is_metal': gap_info_from_dos.get('is_metal', True),
                     'fundamental_gap': gap_info_from_dos.get('band_gap', 0.0),
+                    'fundamental_type': fundamental_type,
                     'vbm_energy': gap_info_from_dos.get('vbm', None),
                     'cbm_energy': gap_info_from_dos.get('cbm', None),
                     'fermi_level': gap_info_from_dos.get('fermi_level', 0.0),
                     # 对于DOS计算，直接带隙和基本带隙相同
-                    'direct_gap': gap_info_from_dos.get('band_gap', 0.0),
-                    'num_bands': band_structure.nb_bands,
-                    # 保留能带结构的原始信息作为参考
-                    'band_structure_gap_info': bs_gap_info,
-                    'band_structure_is_metal': bs_is_metal,
-                    'calculation_method': 'DOS-based calculation with band structure supplement'
-                }
+                    'direct_gap': direct_gap,
+                    'indirect_gap': indirect_gap,
+                    'num_bands': band_structure.nb_bands }
                 
                 self.band_structure = band_structure
                 logger.info(f"能带结构分析完成 - 类型: {type(band_structure).__name__}")
@@ -665,9 +642,9 @@ class PyMatGenDOSAnalyzer:
                 'magnetic_type': 'non-magnetic'
             }
         else:
-            dos_up = complete_dos.densities[Spin.up]
-            dos_down = complete_dos.densities[Spin.down]
-            energies = complete_dos.energies
+            dos_up = complete_dos.densities[Spin.up] #type: ignore
+            dos_down = complete_dos.densities[Spin.down] #type: ignore
+            energies = complete_dos.energies #type: ignore
             
             # 计算磁矩和自旋极化
             spin_diff = dos_up - dos_down
@@ -685,7 +662,7 @@ class PyMatGenDOSAnalyzer:
                 'total_magnetization': float(total_magnetization),
                 'spin_polarization': float(spin_polarization),
                 'max_spin_difference': float(np.max(np.abs(spin_diff))),
-                'fermi_spin_polarization': float(spin_diff[np.argmin(np.abs(energies - complete_dos.efermi))])
+                'fermi_spin_polarization': float(spin_diff[np.argmin(np.abs(energies - complete_dos.efermi))]) #type: ignore
             }
             
             # 尝试从OUTCAR获取更多磁性信息
@@ -1759,7 +1736,8 @@ class PyMatGenDOSHTMLGenerator:
         dos = self.data.get('dos_analysis', {})
         integrals = dos.get('dos_integrals', {})
         orbital = dos.get('orbital_analysis', {})
-        
+        band_structure = self.data.get('band_structure', {})
+        band_type = band_structure.get('fundamental_type', 'unknown')
         return f"""
         <div class=\"section\">
             <h2>📊 态密度分析</h2>
@@ -1772,7 +1750,7 @@ class PyMatGenDOSHTMLGenerator:
                         <tr><td>带隙</td><td>{dos.get('band_gap', 0):.4f} eV</td></tr>
                         <tr><td>导带底</td><td>{dos.get('cbm_energy', 0) or 0:.4f} eV</td></tr>
                         <tr><td>价带顶</td><td>{dos.get('vbm_energy', 0) or 0:.4f} eV</td></tr>
-                        <tr><td>带隙类型</td><td>{dos.get('gap_type', 'unknown')}</td></tr>
+                        <tr><td>带隙类型</td><td>{band_type}</td></tr>
                         <tr><td>材料类型</td><td>{dos.get('material_type', 'unknown')}</td></tr>
                         <tr><td>是否金属</td><td>{'是' if dos.get('is_metal', False) else '否'}</td></tr>
                         <tr><td>自旋极化</td><td>{'是' if dos.get('is_spin_polarized', False) else '否'}</td></tr>
@@ -1847,6 +1825,7 @@ class PyMatGenDOSHTMLGenerator:
                 <tr><td>材料类型</td><td><strong>{'金属' if band.get('is_metal', False) else '半导体/绝缘体'}</strong></td></tr>
                 <tr><td>费米能级</td><td>{fermi_info}</td></tr>
                 <tr><td>基本带隙</td><td><strong>{band.get('fundamental_gap', 0):.4f} eV</strong></td></tr>
+                <tr><td>基本带隙类型</td><td><strong>{band.get('fundamental_type', 'unknown')}</strong></td></tr>
                 <tr><td>直接带隙</td><td><strong>{band.get('direct_gap', 0):.4f} eV</strong></td></tr>
                 <tr><td>价带顶 (VBM)</td><td>{vbm_info}</td></tr>
                 <tr><td>导带底 (CBM)</td><td>{cbm_info}</td></tr>

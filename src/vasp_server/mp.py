@@ -3,7 +3,6 @@ import shutil
 import asyncio
 import traceback
 from mp_api.client import MPRester
-
 API_KEY = 'g8j3tc9BUugnPSzgJ2ppCaxPgEo5W8H7'
 
 def _sanitize_filename(text: str) -> str:

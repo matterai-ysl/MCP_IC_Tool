@@ -578,7 +578,7 @@ def test_dos_from_scf():
     
     # 查找已完成的自洽场计算任务
     tasks = debugger.list_user_tasks(user_id)
-    
+    print(tasks)
     completed_scf_task = "1283839e60d845feb5408e38c6a74fee"
 
     
@@ -745,37 +745,37 @@ def test_md_from_scf():
     print("="*60)
     
     debugger = VASPAPIDebugger()
-    user_id = "workflow_test_user"
+    user_id = "test_user_001"
     
     if not debugger.test_connection():
         return None
     
     # 查找已完成的自洽场任务
     tasks = debugger.list_user_tasks(user_id)
-    completed_scf_task = "1283839e60d845feb5408e38c6a74fee"
+    completed_scf_task = "25e7b78ab9cf48669b40addaccf8956f"
     
 
     
-    if not completed_scf_task:
-        print("⚠️ 未找到已完成的自洽场任务，先提交一个:")
-        scf_task_id = debugger.submit_scf_calculation(
-            user_id=user_id,
-            formula="Li2O",
-            calc_type="SSE",
-            precision="Normal",
-            stable_only=True,
-            selection_mode="most_stable"
-        )
+    # if not completed_scf_task:
+    #     print("⚠️ 未找到已完成的自洽场任务，先提交一个:")
+    #     scf_task_id = debugger.submit_scf_calculation(
+    #         user_id=user_id,
+    #         formula="Li2O",
+    #         calc_type="SSE",
+    #         precision="Normal",
+    #         stable_only=True,
+    #         selection_mode="most_stable"
+    #     )
         
-        if scf_task_id:
-            print("⏳ 等待自洽场计算完成...")
-            debugger.monitor_task(scf_task_id, user_id, max_time=600)
-            completed_scf_task = scf_task_id
-        else:
-            print("❌ 自洽场任务提交失败")
-            return None
+    #     if scf_task_id:
+    #         print("⏳ 等待自洽场计算完成...")
+    #         debugger.monitor_task(scf_task_id, user_id, max_time=600)
+    #         completed_scf_task = scf_task_id
+    #     else:
+    #         print("❌ 自洽场任务提交失败")
+    #         return None
     
-    print(f"✅ 找到已完成的自洽场任务: {completed_scf_task[:8]}...")
+    # print(f"✅ 找到已完成的自洽场任务: {completed_scf_task[:8]}...")
     
     # 提交分子动力学计算
     md_task_id = debugger.submit_md_calculation(

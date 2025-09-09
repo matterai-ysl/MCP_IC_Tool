@@ -1,0 +1,18 @@
+SYSTEM = MD-OXC
+        PREC = Normal
+        ISMEAR = 0
+        SIGMA = 0.1
+        IBRION = 0
+        NSW = 500
+        POTIM = 1.0
+        TEBEG = 300.0
+        TEEND = 300.0
+        SMASS = 0
+        NBLOCK = 1
+        ISYM = 0
+        LCHARG = .FALSE.
+        LWAVE = .FALSE.
+        
+        # NVT系综设置
+        MDALGO = 2
+        ANDERSEN_PROB = 0.1

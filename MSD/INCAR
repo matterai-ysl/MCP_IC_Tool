@@ -1,0 +1,26 @@
+# 基础控制
+SYSTEM = AIMD             # 体系标识
+PREC = Medium             # 中等精度模式
+ENCUT = 400               # 截断能（最大ENMIN）
+# 电子迭代
+EDIFF = 1E-4              # 电子步收敛阈值
+LREAL = Auto              # 实空间投影
+ISMEAR = 0                # Gaussian展宽
+SIGMA = 0.0258            # 展宽宽度
+ALGO = Fast
+ISYM = 0
+# 分子动力学控制
+IBRION = 0                # MD 模式（自由动力学）
+NSW = 15000               # MD 总步数
+POTIM = 0.5               # 时间步长（单位 fs）
+TEBEG = 300               # 初始温度（单位 K）
+TEEND = 300               # 最终温度（单位 K）
+SMASS = 2                 # Nose-Hoover 热浴（SMASS=2 对应固定温度）
+# 输出控制
+LCHARG = .FALSE.          # 不输出 CHGCAR（节省存储）
+LWAVE = .FALSE.           # 不输出 WAVECAR（若需续算则置为.TRUE.）
+NWRITE = 1                # 输出详细程度（1=默认，2=详细）
+# 收敛与性能
+NELMIN = 4                # 最小电子步数（防止过早终止）
+NCORE = 7                 # 并行核心数（需被节点核数整除）
+

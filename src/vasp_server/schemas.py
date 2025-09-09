@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional, Literal, Union
+from typing import Optional, Literal, Union, Dict, Any, List
 from enum import Enum
 
 class CalcType(str, Enum):
@@ -41,6 +41,7 @@ class StructOptRequest(BaseModel):
     
     # VASP计算参数
     kpoint_density: float = Field(30.0, description="K点密度参数")
+    custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
     
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
@@ -115,6 +116,7 @@ class SCFRequest(BaseModel):
     # VASP计算参数
     kpoint_density: float = Field(30.0, description="K点密度参数")
     precision: str = Field("Accurate", description="计算精度 (Normal, High, Accurate)")
+    custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
     
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
@@ -169,6 +171,7 @@ class DOSRequest(BaseModel):
     kpoint_density: float = Field(30.0, description="K点密度参数")
     kpoint_multiplier: float = Field(2.0, description="K点倍增因子 (相对于优化计算)")
     precision: str = Field("Accurate", description="计算精度 (Normal, High, Accurate)")
+    custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
     
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
@@ -223,10 +226,11 @@ class MDRequest(BaseModel):
     
     # MD计算参数
     md_steps: int = Field(1000, description="MD步数")
-    temperature: float = Field(300.0, description="目标温度 (K)")
+    temperature: Union[float, List[float]] = Field(300.0, description="目标温度 (K) - 支持单个温度或温度列表")
     time_step: float = Field(1.0, description="时间步长 (fs)")
     ensemble: str = Field("NVT", description="系综类型 (NVT, NVE, NPT)")
     precision: str = Field("Normal", description="计算精度 (Normal, High, Accurate)")
+    custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
     
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
@@ -244,8 +248,31 @@ class MDResponse(BaseModel):
     status: TaskStatus = Field(..., description="任务状态")
     message: str = Field(..., description="响应消息")
 
+class MDSubtaskResult(BaseModel):
+    """MD子任务结果模型"""
+    temperature: float = Field(..., description="温度 (K)")
+    subtask_dir: str = Field(..., description="子任务目录路径")
+    md_structure: Optional[str] = Field(None, description="MD计算的初始结构文件路径")
+    xdatcar_path: Optional[str] = Field(None, description="XDATCAR轨迹文件路径")
+    oszicar_path: Optional[str] = Field(None, description="OSZICAR能量文件路径")
+    final_energy: Optional[float] = Field(None, description="最终能量 (eV)")
+    average_temperature: Optional[float] = Field(None, description="平均温度 (K)")
+    total_md_steps: Optional[int] = Field(None, description="完成的MD步数")
+    convergence: bool = Field(False, description="是否正常完成")
+    computation_time: Optional[float] = Field(None, description="计算耗时 (秒)")
+    trajectory_data: Optional[dict] = Field(None, description="轨迹统计数据")
+    status: TaskStatus = Field(..., description="子任务状态")
+    error_message: Optional[str] = Field(None, description="错误信息")
+
 class MDResult(BaseModel):
-    """分子动力学计算结果模型"""
+    """分子动力学计算结果模型（支持多温度）"""
+    is_multi_temperature: bool = Field(False, description="是否为多温度计算")
+    total_subtasks: int = Field(1, description="子任务总数")
+    completed_subtasks: int = Field(0, description="已完成子任务数")
+    failed_subtasks: int = Field(0, description="失败子任务数")
+    subtask_results: List[MDSubtaskResult] = Field(default=[], description="各子任务详细结果")
+    
+    # 兼容单温度模式的字段
     md_structure: Optional[str] = Field(None, description="MD计算的初始结构文件路径")
     xdatcar_path: Optional[str] = Field(None, description="XDATCAR轨迹文件路径")
     oszicar_path: Optional[str] = Field(None, description="OSZICAR能量文件路径")

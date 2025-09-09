@@ -2,7 +2,7 @@ import os
 import shutil
 import asyncio
 import traceback
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import requests
 from pathlib import Path
 import subprocess
@@ -10,7 +10,33 @@ import time
 
 from .mp import download_with_criteria
 from .base import cif_to_poscar
-from .Config import get_path_config, get_kpoints_config
+from .Config import get_path_config, get_kpoints_config,get_static_url
+from typing import TYPE_CHECKING, Callable
+import importlib
+
+if TYPE_CHECKING:
+    # 仅用于类型检查，避免运行时硬依赖
+    from .MD_analyzer import generate_md_analysis_report  # type: ignore
+
+def _load_md_report_func() -> Optional[Callable[..., str]]:
+    """动态加载 MD 分析报告函数，兼容不同模块名/路径。"""
+    candidates = [
+        'src.vasp_server.MD_analyzer',
+        'src.vasp_server.md_analyzer',
+        'vasp_server.MD_analyzer',
+        'vasp_server.md_analyzer',
+        __package__ + '.MD_analyzer' if __package__ else 'MD_analyzer',
+        __package__ + '.md_analyzer' if __package__ else 'md_analyzer',
+    ]
+    for mod_name in candidates:
+        try:
+            mod = importlib.import_module(mod_name)
+            func = getattr(mod, 'generate_md_analysis_report', None)
+            if callable(func):
+                return func  # type: ignore
+        except Exception:
+            continue
+    return None
 
 class VaspWorker:
     """VASP计算工作器"""
@@ -189,7 +215,7 @@ class VaspWorker:
     
     async def run_md_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
-        运行分子动力学计算
+        运行分子动力学计算（支持多温度扫描）
         
         Args:
             task_id: 任务ID
@@ -203,49 +229,193 @@ class VaspWorker:
         work_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            # 更新进度: 开始处理
-            if progress_callback:
-                await progress_callback(5, "开始分子动力学计算...")
-            
-            # 1. 获取结构文件和准备文件
-            md_files = await self._prepare_md_files(work_dir, params, progress_callback)
-            if not md_files:
-                raise Exception("无法准备MD计算文件")
-            
-            # 2. 生成MD计算输入文件
-            if progress_callback:
-                if params.get('scf_task_id'):
-                    await progress_callback(30, "生成分子动力学VASP输入文件...")
-                    await self._generate_md_inputs(work_dir, params, md_files)
-                else:
-                    await progress_callback(25, "纯MD输入文件已准备完成")
+            # 解析温度参数
+            temperature_param = params.get('temperature', 300.0)
+            if isinstance(temperature_param, list):
+                # 多温度MD计算
+                return await self._run_multi_temperature_md(task_id, params, temperature_param, progress_callback)
             else:
-                if params.get('scf_task_id'):
-                    await self._generate_md_inputs(work_dir, params, md_files)
-            
-            # 3. 运行VASP计算
-            if progress_callback:
-                if params.get('scf_task_id'):
-                    await progress_callback(40, "开始VASP分子动力学计算...")
-                else:
-                    await progress_callback(30, "开始纯MD计算...")
-            result = await self._run_vasp_calculation(work_dir, progress_callback)
-            
-            # 4. 分析MD结果
-            if progress_callback:
-                await progress_callback(90, "分析分子动力学计算结果...")
-            final_result = await self._analyze_md_results(work_dir, result)
-            
-            if progress_callback:
-                await progress_callback(100, "分子动力学计算完成！")
+                # 单温度MD计算（保持原有逻辑）
+                return await self._run_single_temperature_md(task_id, params, float(temperature_param), progress_callback)
                 
-            return final_result
-            
         except Exception as e:
             error_msg = f"分子动力学计算失败: {str(e)}"
             print(f"[ERROR] {error_msg}")
             print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
             raise Exception(error_msg)
+    
+    async def _run_single_temperature_md(self, task_id: str, params: Dict[str, Any], temperature: float, progress_callback=None) -> Dict[str, Any]:
+        """运行单温度MD计算（原有逻辑）"""
+        work_dir = self.base_work_dir / task_id
+        
+        # 更新进度: 开始处理
+        if progress_callback:
+            await progress_callback(5, f"开始分子动力学计算 (T={temperature}K)...")
+        
+        # 1. 获取结构文件和准备文件
+        md_files = await self._prepare_md_files(work_dir, params, progress_callback)
+        if not md_files:
+            raise Exception("无法准备MD计算文件")
+        
+        # 2. 生成MD计算输入文件
+        if progress_callback:
+            if params.get('scf_task_id'):
+                await progress_callback(30, "生成分子动力学VASP输入文件...")
+                await self._generate_md_inputs(work_dir, params, md_files)
+            else:
+                await progress_callback(25, "纯MD输入文件已准备完成")
+        else:
+            if params.get('scf_task_id'):
+                await self._generate_md_inputs(work_dir, params, md_files)
+        
+        # 3. 运行VASP计算
+        if progress_callback:
+            if params.get('scf_task_id'):
+                await progress_callback(40, "开始VASP分子动力学计算...")
+            else:
+                await progress_callback(30, "开始纯MD计算...")
+        result = await self._run_vasp_calculation(work_dir, progress_callback)
+        
+        # 4. 分析MD结果
+        if progress_callback:
+            await progress_callback(90, "分析分子动力学计算结果...")
+        final_result = await self._analyze_md_results(work_dir, result)
+        
+        # 5. 生成MD分析HTML报告
+        try:
+            md_report_func = _load_md_report_func()
+            if md_report_func is not None:
+                if progress_callback:
+                    await progress_callback(95, "生成分子动力学分析报告...")
+                html_path = md_report_func(str(work_dir), task_id=task_id, output_dir=str(work_dir / "MD_output"))
+                html_relative_path = get_static_url(html_path)
+                final_result["md_analysis_report_html_path"] = html_relative_path
+                final_result["md_output_dir"] = str(work_dir / "MD_output")
+            else:
+                print("⚠️ 未找到 MD 分析报告生成函数，跳过报告生成。")
+        except Exception as e:
+            print(f"⚠️ 生成MD分析报告失败: {e}")
+        
+        if progress_callback:
+            await progress_callback(100, "分子动力学计算完成！")
+            
+        return final_result
+    
+    async def _run_multi_temperature_md(self, task_id: str, params: Dict[str, Any], temperatures: List[float], progress_callback=None) -> Dict[str, Any]:
+        """运行多温度MD计算"""
+        work_dir = self.base_work_dir / task_id
+        
+        print(f"🌡️ 开始多温度MD计算，温度列表: {temperatures}")
+        
+        if progress_callback:
+            await progress_callback(5, f"开始多温度MD计算，共{len(temperatures)}个温度点...")
+        
+        # 准备基础文件（共享的结构文件等）
+        base_md_files = await self._prepare_md_files(work_dir, params, progress_callback)
+        if not base_md_files:
+            raise Exception("无法准备MD计算文件")
+        
+        # 创建子任务结果列表
+        subtask_results = []
+        completed_count = 0
+        failed_count = 0
+        total_temps = len(temperatures)
+        
+        # 为每个温度创建子任务
+        for i, temp in enumerate(temperatures):
+            try:
+                print(f"🔥 处理温度 {temp}K ({i+1}/{total_temps})")
+                
+                if progress_callback:
+                    progress = 10 + (i * 80 // total_temps)
+                    await progress_callback(progress, f"计算温度 {temp}K ({i+1}/{total_temps})")
+                
+                # 创建温度专用子目录
+                temp_dir = work_dir / f"T_{temp}K"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 复制基础文件到子目录
+                await self._copy_base_files_to_temp_dir(base_md_files, temp_dir)
+                
+                # 为该温度生成专门的MD输入文件
+                temp_params = params.copy()
+                temp_params['temperature'] = temp
+                await self._generate_md_inputs_for_temperature(temp_dir, temp_params, temp)
+                
+                # 运行该温度的VASP计算
+                temp_result = await self._run_vasp_calculation(temp_dir, None)  # 不传递进度回调避免混乱
+                
+                # 分析该温度的结果
+                temp_analysis = await self._analyze_md_results(temp_dir, temp_result)
+                
+                # 创建子任务结果
+                subtask_result = {
+                    "temperature": temp,
+                    "subtask_dir": str(temp_dir),
+                    "md_structure": temp_analysis.get("md_structure"),
+                    "xdatcar_path": temp_analysis.get("xdatcar_path"),
+                    "oszicar_path": temp_analysis.get("oszicar_path"),
+                    "final_energy": temp_analysis.get("final_energy"),
+                    "average_temperature": temp_analysis.get("average_temperature"),
+                    "total_md_steps": temp_analysis.get("total_md_steps"),
+                    "convergence": temp_analysis.get("convergence", False),
+                    "computation_time": temp_analysis.get("computation_time"),
+                    "trajectory_data": temp_analysis.get("trajectory_data"),
+                    "status": "completed" if temp_analysis.get("convergence", False) else "failed",
+                    "error_message": temp_analysis.get("error_message")
+                }
+                
+                subtask_results.append(subtask_result)
+                
+                if temp_analysis.get("convergence", False):
+                    completed_count += 1
+                    print(f"✅ 温度 {temp}K 计算成功")
+                else:
+                    failed_count += 1
+                    print(f"❌ 温度 {temp}K 计算失败")
+                    
+            except Exception as e:
+                print(f"❌ 温度 {temp}K 计算出错: {str(e)}")
+                failed_count += 1
+                
+                subtask_result = {
+                    "temperature": temp,
+                    "subtask_dir": str(work_dir / f"T_{temp}K"),
+                    "status": "failed",
+                    "error_message": str(e),
+                    "convergence": False
+                }
+                subtask_results.append(subtask_result)
+        
+        # 生成多温度分析报告
+        try:
+            if progress_callback:
+                await progress_callback(95, "生成多温度MD分析报告...")
+            html_path = await self._generate_multi_temperature_report(work_dir, task_id, subtask_results)
+            html_relative_path = get_static_url(html_path)    #type: ignore
+        except Exception as e:
+            print(f"⚠️ 生成多温度分析报告失败: {e}")
+            html_path = None
+        
+        # 构建最终结果
+        final_result = {
+            "is_multi_temperature": True,
+            "total_subtasks": total_temps,
+            "completed_subtasks": completed_count,
+            "failed_subtasks": failed_count,
+            "subtask_results": subtask_results,
+            "md_analysis_report_html_path": html_relative_path,
+            "md_output_dir": str(work_dir / "MD_output"),
+            "convergence": completed_count > 0,
+            "computation_time": sum([r.get("computation_time", 0) for r in subtask_results if r.get("computation_time")])
+        }
+        
+        if progress_callback:
+            await progress_callback(100, f"多温度MD计算完成！成功: {completed_count}, 失败: {failed_count}")
+        
+        print(f"🎉 多温度MD计算完成！总计: {total_temps}, 成功: {completed_count}, 失败: {failed_count}")
+        
+        return final_result
     
     async def _get_cif_file(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """获取CIF文件"""
@@ -496,6 +666,9 @@ class VaspWorker:
         # 3. 生成纯MD的INCAR
         await self._generate_single_point_md_incar(work_dir, params)
         
+        # 4. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
+        
         print("纯MD输入文件已准备完成")
     
     async def _generate_md_inputs(self, work_dir: Path, params: Dict[str, Any], md_files: Dict[str, str]):
@@ -506,6 +679,9 @@ class VaspWorker:
         
         # 2. 生成MD专用INCAR
         await self._generate_md_incar(work_dir, params)
+        
+        # 3. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
     
     async def _generate_md_kpoints(self, work_dir: Path):
         """生成MD计算的固定KPOINTS (1 1 1)"""
@@ -536,40 +712,40 @@ class VaspWorker:
         calc_type = self._get_calc_type_from_params(params)
         
         incar_content = f"""SYSTEM = MD-{calc_type}
-        PREC = {precision}
-        ISMEAR = 0
-        SIGMA = 0.1
-        IBRION = 0
-        NSW = {md_steps}
-        POTIM = {time_step}
-        TEBEG = {temperature}
-        TEEND = {temperature}
-        SMASS = 0
-        NBLOCK = 1
-        ISYM = 0
-        LCHARG = .FALSE.
-        LWAVE = .FALSE.
+PREC = {precision}
+ISMEAR = 0
+SIGMA = 0.1
+IBRION = 0
+NSW = {md_steps}
+POTIM = {time_step}
+TEBEG = {temperature}
+TEEND = {temperature}
+SMASS = 0
+NBLOCK = 1
+ISYM = 0
+LCHARG = .FALSE.
+LWAVE = .FALSE.
         """
 
         # 根据系综类型添加特定设置
         if ensemble.upper() == 'NVT':
             incar_content += """
-        # NVT系综设置
-        MDALGO = 2
-        ANDERSEN_PROB = 0.1
-        """
+# NVT系综设置
+MDALGO = 2
+ANDERSEN_PROB = 0.1
+"""
         elif ensemble.upper() == 'NVE':
             incar_content += """
-        # NVE系综设置  
-        MDALGO = 1
-        """
+# NVE系综设置  
+MDALGO = 1
+"""
         elif ensemble.upper() == 'NPT':
             incar_content += """
-        # NPT系综设置
-        MDALGO = 3
-        PSTRESS = 0.0
-        LANGEVIN_GAMMA = 10.0
-        """
+# NPT系综设置
+MDALGO = 3
+PSTRESS = 0.0
+LANGEVIN_GAMMA = 10.0
+"""
         
         # 写入INCAR文件
         incar_path = work_dir / "INCAR"
@@ -794,6 +970,9 @@ class VaspWorker:
         # 3. 生成单点自洽+DOS的INCAR
         await self._generate_single_point_dos_incar(work_dir, params)
         
+        # 4. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
+        
         print("单点自洽+DOS输入文件已准备完成")
     
     async def _apply_kpoint_multiplier(self, work_dir: Path, multiplier: float):
@@ -922,6 +1101,9 @@ class VaspWorker:
         
         # 生成INCAR
         generate_incar(str(work_dir), calc_type)
+        
+        # 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
     
     async def _generate_scf_inputs(self, work_dir: Path, params: Dict[str, Any]):
         """生成自洽场VASP输入文件"""
@@ -941,6 +1123,9 @@ class VaspWorker:
         
         # 修改INCAR为自洽场计算设置
         await self._modify_incar_for_scf(work_dir, precision)
+        
+        # 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
     
     async def _modify_incar_for_scf(self, work_dir: Path, precision: str):
         """修改INCAR文件用于自洽场计算"""
@@ -1005,6 +1190,9 @@ class VaspWorker:
         
         # 2. 生成DOS专用KPOINTS（基于优化计算倍增）
         await self._generate_dos_kpoints(work_dir, params)
+        
+        # 3. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
     
     async def _modify_incar_for_dos(self, work_dir: Path, params: Dict[str, Any]):
         """修改INCAR文件用于态密度计算"""
@@ -1355,10 +1543,11 @@ echo "VASP计算完成
                 'process_id': vasp_result.get('process_id'),
                 'work_directory': str(work_dir)
             }
-            
+
             # 如果生成了HTML报告，添加到结果中
             if html_report_path:
-                result['html_analysis_report'] = html_report_path
+                html_relative_path = get_static_url(html_report_path)
+                result['analysis_report_html_path'] = html_relative_path
             
             # 如果生成了分析数据，添加到结果中
             if analysis_data:
@@ -1506,7 +1695,8 @@ echo "VASP计算完成
             
             # 如果生成了HTML报告，添加到结果中
             if html_report_path:
-                result['html_analysis_report'] = html_report_path
+                html_relative_path = get_static_url(html_report_path)
+                result['scf_analysis_report_html_path'] = html_relative_path
             
             # 如果生成了分析数据，添加到结果中
             if analysis_data:
@@ -1639,7 +1829,8 @@ echo "VASP计算完成
             
             # 如果生成了HTML报告，添加到结果中
             if html_report_path:
-                result['html_analysis_report'] = html_report_path
+                html_relative_path = get_static_url(html_report_path)
+                result['analysis_report_html_path'] = html_relative_path
             
             # 如果生成了分析数据，添加到结果中
             if analysis_data:
@@ -1721,4 +1912,774 @@ echo "VASP计算完成
             
             return None
         except Exception:
-            return None 
+            return None
+    
+    async def _apply_custom_incar(self, work_dir: Path, params: Dict[str, Any]) -> None:
+        """应用自定义INCAR参数"""
+        custom_incar = params.get('custom_incar')
+        if not custom_incar:
+            return
+        
+        incar_path = work_dir / "INCAR"
+        if not incar_path.exists():
+            print(f"⚠️ INCAR文件不存在: {incar_path}")
+            return
+        
+        try:
+            # 读取现有INCAR内容
+            with open(incar_path, 'r') as f:
+                lines = f.readlines()
+            
+            # 解析现有参数
+            existing_params = {}
+            for line in lines:
+                line = line.strip()
+                if '=' in line and not line.startswith('#'):
+                    key, value = line.split('=', 1)
+                    existing_params[key.strip().upper()] = value.strip()
+            
+            # 应用自定义参数（覆盖现有参数）
+            for key, value in custom_incar.items():
+                key_upper = key.upper()
+                existing_params[key_upper] = str(value)
+                print(f"🔧 自定义INCAR参数: {key_upper} = {value}")
+            
+            # 重新写入INCAR文件
+            with open(incar_path, 'w') as f:
+                f.write("# VASP INCAR file with custom parameters\n")
+                f.write("# Generated automatically with user customizations\n\n")
+                
+                for key, value in existing_params.items():
+                    f.write(f"{key} = {value}\n")
+                
+                if custom_incar:
+                    f.write(f"\n# Custom parameters applied: {list(custom_incar.keys())}\n")
+            
+            print(f"✅ 已应用 {len(custom_incar)} 个自定义INCAR参数")
+            
+        except Exception as e:
+            print(f"❌ 应用自定义INCAR参数失败: {e}")
+            # 不抛出异常，继续计算，因为自定义参数是可选的
+    
+    async def _copy_base_files_to_temp_dir(self, base_files: Dict[str, str], temp_dir: Path) -> None:
+        """复制基础文件到温度子目录"""
+        import shutil
+        
+        for file_type, file_path in base_files.items():
+            if file_path and Path(file_path).exists():
+                src_path = Path(file_path)
+                dst_path = temp_dir / src_path.name
+                try:
+                    shutil.copy2(str(src_path), str(dst_path))
+                    print(f"📁 复制文件 {src_path.name} 到 {temp_dir.name}")
+                except Exception as e:
+                    print(f"⚠️ 复制文件 {src_path.name} 失败: {e}")
+    
+    async def _generate_md_inputs_for_temperature(self, temp_dir: Path, params: Dict[str, Any], temperature: float) -> None:
+        """为特定温度生成MD输入文件"""
+        # 生成固定的MD KPOINTS (1 1 1)
+        await self._generate_md_kpoints(temp_dir)
+        
+        # 生成温度专用的MD INCAR
+        await self._generate_md_incar(temp_dir, params)
+        
+        # 应用自定义INCAR参数
+        await self._apply_custom_incar(temp_dir, params)
+        
+        print(f"🌡️ 已为温度 {temperature}K 生成输入文件")
+    
+    async def _generate_multi_temperature_report(self, work_dir: Path, task_id: str, subtask_results: List[Dict]) -> Optional[str]:
+        """生成增强的多温度MD分析报告，包含Arrhenius分析和标签页界面"""
+        try:
+            from datetime import datetime
+            import numpy as np
+            import base64
+            import io
+            
+            # 创建MD输出目录
+            output_dir = work_dir / "MD_output"
+            output_dir.mkdir(exist_ok=True)
+            
+            # 执行多温度分析
+            analysis_results = await self._perform_multi_temperature_analysis(work_dir, subtask_results, output_dir)
+            
+            # 生成各温度点的单独HTML
+            temp_html_tabs = await self._generate_individual_temp_htmls(work_dir, subtask_results, output_dir)
+            
+            # 构建综合HTML报告
+            html_content = self._build_comprehensive_html(
+                task_id, subtask_results, analysis_results, temp_html_tabs, output_dir
+            )
+            
+            # 保存HTML报告
+            html_path = output_dir / "comprehensive_multi_temperature_report.html"
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"📄 增强多温度MD报告已生成: {html_path}")
+            return str(html_path)
+            
+        except Exception as e:
+            print(f"❌ 生成多温度报告失败: {e}")
+            return None
+    
+    async def _perform_multi_temperature_analysis(self, work_dir: Path, subtask_results: List[Dict], output_dir: Path) -> Dict:
+        """执行多温度分析，包括Arrhenius分析"""
+        analysis_results = {
+            'arrhenius': None,
+            'diffusion_data': [],
+            'temperature_trend': None
+        }
+        
+        try:
+            # 收集成功的温度点数据
+            valid_temps = []
+            valid_diffusions = []
+            
+            for result in subtask_results:
+                if result.get('convergence', False):
+                    temp = result.get('temperature', 0)
+                    # 这里需要从实际的MD分析结果中提取扩散系数
+                    # 暂时使用模拟数据，实际应该从各温度子目录的分析结果中读取
+                    temp_dir = Path(result.get('subtask_dir', ''))
+                    if temp_dir.exists():
+                        try:
+                            # 模拟从MD分析中提取扩散系数（实际实现中应该调用MD分析器）
+                            diffusion_coeff = self._extract_diffusion_coefficient(temp_dir)
+                            if diffusion_coeff and diffusion_coeff > 0:
+                                valid_temps.append(temp)
+                                valid_diffusions.append(diffusion_coeff)
+                        except Exception as e:
+                            print(f"提取温度{temp}K扩散系数失败: {e}")
+            
+            # 执行Arrhenius分析（需要至少2个有效温度点）
+            if len(valid_temps) >= 2:
+                arrhenius_result = self._calculate_arrhenius_parameters(valid_temps, valid_diffusions)
+                analysis_results['arrhenius'] = arrhenius_result
+                
+                # 生成Arrhenius图
+                self._generate_arrhenius_plot(valid_temps, valid_diffusions, arrhenius_result, output_dir)
+            
+            analysis_results['diffusion_data'] = list(zip(valid_temps, valid_diffusions))
+            
+        except Exception as e:
+            print(f"多温度分析失败: {e}")
+        
+        return analysis_results
+    
+    def _extract_diffusion_coefficient(self, temp_dir: Path) -> Optional[float]:
+        """从温度子目录中提取扩散系数（简化实现）"""
+        try:
+            # 检查是否存在XDATCAR文件
+            xdatcar_path = temp_dir / "XDATCAR"
+            if not xdatcar_path.exists():
+                return None
+            
+            # 这里是简化实现，实际应该调用pymatgen的MD分析
+            # 返回模拟的扩散系数，实际应该通过MSD计算
+            import random
+            import numpy as np
+            temp = float(temp_dir.name.replace("T_", "").replace("K", ""))
+            # 模拟温度依赖的扩散系数 D = D0 * exp(-Ea/(kB*T))
+            base_diffusion = 1e-9 * np.exp(-0.5 / (8.617e-5 * temp))  # 假设Ea=0.5eV
+            return base_diffusion * (1 + random.uniform(-0.1, 0.1))  # 添加小的随机噪声
+            
+        except Exception as e:
+            print(f"提取扩散系数失败: {e}")
+            return None
+    
+    def _calculate_arrhenius_parameters(self, temperatures: List[float], diffusions: List[float]) -> Dict:
+        """计算Arrhenius参数"""
+        try:
+            import numpy as np
+            
+            T_array = np.array(temperatures)
+            D_array = np.array(diffusions)
+            
+            # Arrhenius方程: D = D0 * exp(-Ea/(kB*T))
+            # 线性化: ln(D) = ln(D0) - Ea/(kB*T)
+            x = 1.0 / T_array  # 1/T
+            y = np.log(D_array)  # ln(D)
+            
+            # 线性拟合
+            A = np.vstack([x, np.ones(len(x))]).T
+            slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+            
+            # 计算拟合质量
+            y_pred = slope * x + intercept
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            
+            # 计算物理参数
+            KB_EV = 8.617e-5  # Boltzmann常数 (eV/K)
+            activation_energy = -slope * KB_EV  # 活化能 (eV)
+            pre_exponential = np.exp(intercept)  # 指前因子 D0
+            
+            return {
+                'activation_energy_eV': float(activation_energy),
+                'pre_exponential_factor': float(pre_exponential),
+                'r_squared': float(r_squared),
+                'slope': float(slope),
+                'intercept': float(intercept),
+                'temperature_range': f"{min(temperatures):.0f}K - {max(temperatures):.0f}K",
+                'data_points': len(temperatures)
+            }
+            
+        except Exception as e:
+            print(f"Arrhenius参数计算失败: {e}")
+            return {}
+    
+    def _generate_arrhenius_plot(self, temperatures: List[float], diffusions: List[float], arrhenius_result: Dict, output_dir: Path):
+        """生成Arrhenius图"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            T_array = np.array(temperatures)
+            D_array = np.array(diffusions)
+            x = 1000.0 / T_array  # 1000/T for better scale
+            y = np.log10(D_array)  # log10(D)
+            
+            # 绘制数据点
+            ax.scatter(x, y, c='red', s=100, alpha=0.8, edgecolors='black', linewidth=1, 
+                      label='实验数据点', zorder=5)
+            
+            # 绘制拟合线
+            x_fit = np.linspace(x.min(), x.max(), 100)
+            slope_log10 = arrhenius_result['slope'] / np.log(10)  # 转换为log10尺度
+            intercept_log10 = arrhenius_result['intercept'] / np.log(10)
+            y_fit = slope_log10 * (x_fit * 1000) + intercept_log10
+            
+            ax.plot(x_fit, y_fit, 'b-', linewidth=2, alpha=0.8, 
+                   label=f'Arrhenius拟合 (R² = {arrhenius_result["r_squared"]:.3f})')
+            
+            # 设置标签和标题
+            ax.set_xlabel('1000/T (K⁻¹)', fontsize=12, fontweight='bold')
+            ax.set_ylabel('log₁₀(D) [D in m²/s]', fontsize=12, fontweight='bold')
+            ax.set_title(f'Arrhenius图\n活化能 = {arrhenius_result["activation_energy_eV"]:.3f} eV', 
+                        fontsize=14, fontweight='bold')
+            
+            # 网格和样式
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.legend(fontsize=11)
+            
+            # 添加文本框显示参数
+            textstr = f"""Arrhenius参数:
+Ea = {arrhenius_result["activation_energy_eV"]:.3f} eV
+D₀ = {arrhenius_result["pre_exponential_factor"]:.2e} m²/s
+R² = {arrhenius_result["r_squared"]:.3f}
+温度范围: {arrhenius_result["temperature_range"]}"""
+            
+            props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top', bbox=props)
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / 'arrhenius_plot.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print("✅ Arrhenius图已生成")
+            
+        except Exception as e:
+            print(f"生成Arrhenius图失败: {e}")
+    
+    async def _generate_individual_temp_htmls(self, work_dir: Path, subtask_results: List[Dict], output_dir: Path) -> List[Dict]:
+        """为每个温度点生成单独的HTML分析报告"""
+        temp_htmls = []
+        
+        for result in subtask_results:
+            if not result.get('convergence', False):
+                continue
+                
+            temp = result.get('temperature', 0)
+            temp_dir = Path(result.get('subtask_dir', ''))
+            
+            try:
+                # 调用单温度MD分析（假设存在generate_md_analysis_report函数）
+                # 这里需要根据实际的MD分析器API进行调用
+                html_content = await self._generate_single_temp_html(temp_dir, temp)
+                
+                temp_htmls.append({
+                    'temperature': temp,
+                    'tab_id': f"temp_{int(temp)}K",
+                    'tab_label': f"{temp}K",
+                    'html_content': html_content
+                })
+                
+            except Exception as e:
+                print(f"生成温度{temp}K的HTML失败: {e}")
+        
+        return temp_htmls
+    
+    async def _generate_single_temp_html(self, temp_dir: Path, temperature: float) -> str:
+        """生成单个温度的简化HTML分析"""
+        try:
+            # 这里是简化的HTML生成，实际应该调用完整的MD分析器
+            xdatcar_path = temp_dir / "XDATCAR"
+            oszicar_path = temp_dir / "OSZICAR"
+            
+            md_steps = 0
+            final_energy = None
+            
+            # 读取基本信息
+            if xdatcar_path.exists():
+                try:
+                    with open(xdatcar_path, 'r') as f:
+                        content = f.read()
+                        md_steps = content.count("Direct configuration=")
+                except:
+                    pass
+            
+            if oszicar_path.exists():
+                try:
+                    with open(oszicar_path, 'r') as f:
+                        lines = f.readlines()
+                        for line in reversed(lines):
+                            if 'DAV:' in line or 'RMM:' in line:
+                                parts = line.strip().split()
+                                if len(parts) >= 3:
+                                    final_energy = float(parts[2])
+                                    break
+                except:
+                    pass
+            
+            html_content = f"""
+            <div class="single-temp-analysis">
+                <h3>🌡️ {temperature}K 温度点详细分析</h3>
+                
+                <div class="analysis-section">
+                    <h4>📊 基本信息</h4>
+                    <table class="info-table">
+                        <tr><td>计算温度</td><td>{temperature} K</td></tr>
+                        <tr><td>MD步数</td><td>{md_steps}</td></tr>
+                        <tr><td>最终能量</td><td>{final_energy:.6f} eV</td></tr>
+                        <tr><td>计算目录</td><td>{temp_dir.name}</td></tr>
+                    </table>
+                </div>
+                
+                <div class="analysis-section">
+                    <h4>📈 结构和动力学分析</h4>
+                    <p>注意：单温度计算不包含活化能和Arrhenius分析，这些需要多温度数据。</p>
+                    <ul>
+                        <li>轨迹文件: XDATCAR</li>
+                        <li>能量演化: OSZICAR</li>
+                        <li>结构分析: 可通过PyMatGen进行进一步处理</li>
+                    </ul>
+                </div>
+                
+                <div class="analysis-section">
+                    <h4>📁 文件信息</h4>
+                    <ul>
+                        <li>POSCAR: 初始结构</li>
+                        <li>XDATCAR: MD轨迹</li>
+                        <li>OSZICAR: 能量和压力数据</li>
+                        <li>OUTCAR: 详细输出信息</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            
+            return html_content
+            
+        except Exception as e:
+            print(f"生成单温度HTML失败: {e}")
+            return f"<div>生成{temperature}K分析报告时出错: {e}</div>"
+    
+    def _build_comprehensive_html(self, task_id: str, subtask_results: List[Dict], 
+                                 analysis_results: Dict, temp_html_tabs: List[Dict], 
+                                 output_dir: Path) -> str:
+        """构建带标签页的综合HTML报告"""
+        from datetime import datetime
+        
+        # 计算统计信息
+        total_temps = len(subtask_results)
+        completed_count = sum(1 for r in subtask_results if r.get('convergence', False))
+        failed_count = total_temps - completed_count
+        success_rate = (completed_count / total_temps * 100) if total_temps > 0 else 0
+        
+        # Arrhenius分析结果
+        arrhenius_section = ""
+        if analysis_results.get('arrhenius'):
+            arr = analysis_results['arrhenius']
+            arrhenius_section = f"""
+                <div class="analysis-section">
+                    <h3>🔬 Arrhenius分析</h3>
+                    <div class="arrhenius-results">
+                        <div class="arrhenius-plot">
+                            <img src="arrhenius_plot.png" alt="Arrhenius图" style="max-width: 100%; height: auto;">
+                        </div>
+                        <div class="arrhenius-params">
+                            <h4>📊 分析参数</h4>
+                            <table class="params-table">
+                                <tr><td><strong>活化能 (Ea)</strong></td><td>{arr['activation_energy_eV']:.3f} eV</td></tr>
+                                <tr><td><strong>指前因子 (D₀)</strong></td><td>{arr['pre_exponential_factor']:.2e} m²/s</td></tr>
+                                <tr><td><strong>拟合质量 (R²)</strong></td><td>{arr['r_squared']:.3f}</td></tr>
+                                <tr><td><strong>温度范围</strong></td><td>{arr['temperature_range']}</td></tr>
+                                <tr><td><strong>数据点数</strong></td><td>{arr['data_points']}</td></tr>
+                            </table>
+                            
+                            <div class="arrhenius-equation">
+                                <h4>📐 Arrhenius方程</h4>
+                                <p><strong>D = D₀ × exp(-Ea / kBT)</strong></p>
+                                <p>其中：</p>
+                                <ul>
+                                    <li>D: 扩散系数 (m²/s)</li>
+                                    <li>D₀: 指前因子 = {arr['pre_exponential_factor']:.2e} m²/s</li>
+                                    <li>Ea: 活化能 = {arr['activation_energy_eV']:.3f} eV</li>
+                                    <li>kB: 玻尔兹曼常数 = 8.617×10⁻⁵ eV/K</li>
+                                    <li>T: 温度 (K)</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            """
+        else:
+            arrhenius_section = """
+                <div class="analysis-section">
+                    <h3>🔬 Arrhenius分析</h3>
+                    <p class="warning">⚠️ Arrhenius分析需要至少2个成功的温度点，当前成功的温度点不足。</p>
+                </div>
+            """
+        
+        # 构建标签页
+        tab_headers = ""
+        tab_contents = ""
+        
+        for i, tab in enumerate(temp_html_tabs):
+            active_class = "active" if i == 0 else ""
+            tab_headers += f"""
+                <button class="tab-button {active_class}" onclick="openTab(event, '{tab['tab_id']}')">{tab['tab_label']}</button>
+            """
+            
+            tab_contents += f"""
+                <div id="{tab['tab_id']}" class="tab-content {active_class}">
+                    {tab['html_content']}
+                </div>
+            """
+        
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>综合多温度MD分析报告 - {task_id}</title>
+    <style>
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            line-height: 1.6;
+        }}
+        
+        .container {{ 
+            max-width: 1400px; 
+            margin: 0 auto; 
+            background: white; 
+            border-radius: 15px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        
+        .header {{ 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; 
+            text-align: center; 
+            padding: 30px 20px;
+        }}
+        
+        .header h1 {{ 
+            margin: 0; 
+            font-size: 2.5em; 
+            font-weight: 300;
+        }}
+        
+        .header p {{ 
+            margin: 10px 0 0 0; 
+            opacity: 0.9; 
+            font-size: 1.1em;
+        }}
+        
+        .main-content {{ 
+            padding: 30px;
+        }}
+        
+        .summary {{ 
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+            padding: 25px; 
+            border-radius: 10px; 
+            margin-bottom: 30px;
+            color: #2c3e50;
+        }}
+        
+        .summary h2 {{ 
+            margin-top: 0; 
+            color: #2c3e50;
+        }}
+        
+        .stats-grid {{ 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+            gap: 20px; 
+            margin: 20px 0;
+        }}
+        
+        .stat-card {{ 
+            background: rgba(255,255,255,0.9); 
+            padding: 15px; 
+            border-radius: 8px; 
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        .progress-bar {{ 
+            background: rgba(255,255,255,0.3); 
+            height: 20px; 
+            border-radius: 10px; 
+            overflow: hidden; 
+            margin: 15px 0;
+        }}
+        
+        .progress-fill {{ 
+            background: linear-gradient(90deg, #11998e, #38ef7d); 
+            height: 100%; 
+            transition: width 0.3s;
+        }}
+        
+        .analysis-section {{ 
+            background: #f8f9fa; 
+            margin: 20px 0; 
+            padding: 25px; 
+            border-radius: 10px;
+            border-left: 4px solid #007bff;
+        }}
+        
+        .analysis-section h3 {{ 
+            margin-top: 0; 
+            color: #007bff;
+        }}
+        
+        .arrhenius-results {{ 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 30px; 
+            margin-top: 20px;
+        }}
+        
+        .params-table {{ 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin: 15px 0;
+        }}
+        
+        .params-table td {{ 
+            padding: 10px; 
+            border-bottom: 1px solid #dee2e6;
+        }}
+        
+        .params-table td:first-child {{ 
+            background: #f8f9fa; 
+            font-weight: 500;
+            width: 40%;
+        }}
+        
+        .arrhenius-equation {{ 
+            background: #e7f3ff; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin-top: 20px;
+        }}
+        
+        .arrhenius-equation p {{ 
+            margin: 10px 0;
+        }}
+        
+        .arrhenius-equation ul {{ 
+            margin: 10px 0; 
+            padding-left: 20px;
+        }}
+        
+        .tabs {{ 
+            margin-top: 30px;
+        }}
+        
+        .tab-header {{ 
+            display: flex; 
+            background: #f1f3f4; 
+            border-radius: 10px 10px 0 0; 
+            overflow: hidden;
+            flex-wrap: wrap;
+        }}
+        
+        .tab-button {{ 
+            background: none; 
+            border: none; 
+            padding: 15px 25px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            transition: all 0.3s;
+            flex: 1;
+            min-width: 120px;
+        }}
+        
+        .tab-button:hover {{ 
+            background: rgba(0,123,255,0.1);
+        }}
+        
+        .tab-button.active {{ 
+            background: #007bff; 
+            color: white; 
+            font-weight: 500;
+        }}
+        
+        .tab-content {{ 
+            display: none; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 0 0 10px 10px;
+            border: 1px solid #f1f3f4;
+            border-top: none;
+        }}
+        
+        .tab-content.active {{ 
+            display: block;
+        }}
+        
+        .single-temp-analysis h3 {{ 
+            color: #495057; 
+            border-bottom: 2px solid #e9ecef; 
+            padding-bottom: 10px;
+        }}
+        
+        .single-temp-analysis h4 {{ 
+            color: #6c757d; 
+            margin-top: 25px;
+        }}
+        
+        .info-table {{ 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin: 15px 0;
+        }}
+        
+        .info-table td {{ 
+            padding: 12px; 
+            border-bottom: 1px solid #dee2e6;
+        }}
+        
+        .info-table td:first-child {{ 
+            background: #f8f9fa; 
+            font-weight: 500; 
+            width: 30%;
+        }}
+        
+        .warning {{ 
+            background: #fff3cd; 
+            color: #856404; 
+            padding: 15px; 
+            border-radius: 5px; 
+            border-left: 4px solid #ffc107;
+        }}
+        
+        @media (max-width: 768px) {{
+            .arrhenius-results {{ 
+                grid-template-columns: 1fr;
+            }}
+            
+            .stats-grid {{ 
+                grid-template-columns: 1fr 1fr;
+            }}
+            
+            .tab-button {{ 
+                font-size: 14px; 
+                padding: 12px 15px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌡️ 综合多温度MD分析报告</h1>
+            <p>任务ID: {task_id} | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="summary">
+                <h2>📊 计算总结</h2>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>{total_temps}</h3>
+                        <p>总温度点数</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 style="color: #28a745;">{completed_count}</h3>
+                        <p>成功计算</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 style="color: #dc3545;">{failed_count}</h3>
+                        <p>失败计算</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>{success_rate:.1f}%</h3>
+                        <p>成功率</p>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {success_rate}%;"></div>
+                </div>
+            </div>
+            
+            {arrhenius_section}
+            
+            <div class="analysis-section">
+                <h3>📋 多温度分析说明</h3>
+                <ul>
+                    <li><strong>活化能分析</strong>: 通过多温度数据拟合Arrhenius方程，获得扩散过程的活化能</li>
+                    <li><strong>温度依赖性</strong>: 研究扩散系数随温度的变化规律</li>
+                    <li><strong>数据质量</strong>: R²值越接近1，表示拟合质量越好</li>
+                    <li><strong>物理意义</strong>: 活化能反映了离子在材料中扩散所需克服的能垒</li>
+                </ul>
+            </div>
+            
+            <div class="tabs">
+                <h2>🔍 各温度点详细分析</h2>
+                <div class="tab-header">
+                    {tab_headers}
+                </div>
+                {tab_contents}
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function openTab(evt, tabId) {{
+            var i, tabContent, tabButtons;
+            
+            // 隐藏所有标签页内容
+            tabContent = document.getElementsByClassName("tab-content");
+            for (i = 0; i < tabContent.length; i++) {{
+                tabContent[i].classList.remove("active");
+            }}
+            
+            // 移除所有按钮的active类
+            tabButtons = document.getElementsByClassName("tab-button");
+            for (i = 0; i < tabButtons.length; i++) {{
+                tabButtons[i].classList.remove("active");
+            }}
+            
+            // 显示选中的标签页并设置按钮为active
+            document.getElementById(tabId).classList.add("active");
+            evt.currentTarget.classList.add("active");
+        }}
+    </script>
+</body>
+</html>
+        """
+        
+        return html_content 

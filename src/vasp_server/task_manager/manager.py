@@ -200,7 +200,7 @@ class TaskManager:
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
                         # 存储详细的结果数据
-                        task.result_data = self._prepare_result_data(result)  # type: ignore
+                        task.result_data = result  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
