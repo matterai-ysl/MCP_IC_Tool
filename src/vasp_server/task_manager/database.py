@@ -2,13 +2,19 @@ import os
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "tasks.db")
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
+# 云端数据库配置
+DB_HOST = os.getenv("DB_HOST", "pgm-uf69uij17z9vh123jo.pg.rds.aliyuncs.com")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "ADK")
+DB_USER = os.getenv("DB_USER", "a2252222223")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "Jixiaobei123")
+
+SQLALCHEMY_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    pool_pre_ping=True,
+    pool_recycle=300,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -26,22 +32,18 @@ def init_db() -> None:
 def check_and_init_db() -> None:
     """检查数据库表是否存在，如果不存在则自动创建"""
     try:
-        # 检查数据库文件是否存在
-        if not os.path.exists(DB_PATH):
-            print(f"📁 数据库文件不存在，将创建: {DB_PATH}")
-            init_db()
-            return
+        print(f"🔗 连接云端数据库: {DB_HOST}:{DB_PORT}/{DB_NAME}")
 
         # 检查表是否存在
         inspector = inspect(engine)
         tables = inspector.get_table_names()
-        
+
         if 'tasks' not in tables:
             print("⚠️  数据库表不存在，开始自动初始化...")
             init_db()
         else:
             print("✅ 数据库表已存在")
-            
+
     except Exception as e:
         print(f"⚠️  数据库检查失败，尝试初始化: {e}")
         try:

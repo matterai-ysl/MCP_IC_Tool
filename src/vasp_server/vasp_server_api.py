@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -390,7 +390,7 @@ async def submit_md_calculation(request: MDRequest):
 
  
 @app.get("/vasp/task/{task_id}", response_model=TaskStatusResponse)
-async def get_task_status(task_id: str, user_id: str):
+async def get_task_status(task_id: str, user_id: str = Query(..., description="用户ID")):
     """
     查询任务状态与任务结果
     
@@ -481,7 +481,7 @@ async def get_task_status(task_id: str, user_id: str):
 
 
 @app.post("/vasp/task/{task_id}/cancel")
-async def cancel_task(task_id: str, user_id: str):
+async def cancel_task(task_id: str, user_id: str = Query(..., description="用户ID")):
     """
     取消任务
     
@@ -507,7 +507,7 @@ async def cancel_task(task_id: str, user_id: str):
 
 
 @app.get("/vasp/tasks", response_model=List[TaskStatusResponse])
-async def list_user_tasks(user_id: str):
+async def list_user_tasks(user_id: str = Query(..., description="用户ID")):
     """
     列出用户的所有任务
     
