@@ -1,6 +1,6 @@
 from typing import Any, Dict, Optional
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP,Context
 
 from .client import VaspAPIClient
 from .config import mcp_config
@@ -51,12 +51,16 @@ custom_incar参数接受字典格式，键为INCAR参数名，值为参数值。
 {"custom_incar": {"LORBIT": 11, "NEDOS": 3000, "ISMEAR": -5}}
 {"custom_incar": {"SMASS": 1, "POTIM": 0.5, "ISYM": 0}}
 """
-
+def get_user_id(ctx: Context) -> str:
+    if ctx is not None:
+        user_id = ctx.request_context.request.headers.get("user_id", None)  # type: ignore
+    else:
+        user_id = "123"
+    return user_id #type: ignore
 
 @mcp.tool()
 async def submit_structure_optimization(
     calc_type: str,
-    user_id: str = "123",
     formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     spacegroup: Optional[str] = None,
@@ -68,7 +72,8 @@ async def submit_structure_optimization(
     stable_only: Optional[bool] = None,
     selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
-    custom_incar: Optional[Dict[str, Any]] = None
+    custom_incar: Optional[Dict[str, Any]] = None,
+    ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
     提交结构优化任务，返回任务信息。
@@ -80,7 +85,6 @@ async def submit_structure_optimization(
       * "ORC" - 氧化物还原催化剂
       * "ECAT_OER" - 氧析出反应催化剂
       * "ECAT_HER" - 氢析出反应催化剂
-    - user_id (可选): 用户ID，默认为"123"
     - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url二选一
     - cif_url (可选): CIF文件的URL地址，与formula二选一
     - spacegroup (可选): 空间群符号，如"P1", "Fm-3m"，仅当使用formula时有效，用于筛选结构
@@ -99,6 +103,7 @@ async def submit_structure_optimization(
     submit_structure_optimization(calc_type="OXC", formula="Li2O", custom_incar={"EDIFF": 1e-7, "NELM": 100, "ALGO": "Fast"})
     """
     params = {k: v for k, v in locals().items() if v is not None}
+    params["user_id"] = get_user_id(ctx)
     print("submit_structure_optimization")
     print(params)
     payload = StructOptInput(**params).model_dump(mode="json", by_alias=True)
@@ -109,7 +114,6 @@ async def submit_structure_optimization(
 
 @mcp.tool()
 async def submit_scf_calculation(
-    user_id: str,
     calc_type: str,
     formula: Optional[str] = None,
     cif_url: Optional[str] = None,
@@ -124,13 +128,14 @@ async def submit_scf_calculation(
     selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None
+    custom_incar: Optional[Dict[str, Any]] = None,
+    ctx: Context = None #type: ignore
+
 ) -> Dict[str, Any]:
     """
     提交自洽场计算任务，返回任务信息。
     
     参数说明:
-    - user_id (必填): 用户ID
     - calc_type (必填): 计算类型，同结构优化
     - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和optimized_task_id三选一
     - cif_url (可选): CIF文件的URL地址，与formula和optimized_task_id三选一
@@ -152,13 +157,13 @@ async def submit_scf_calculation(
     submit_scf_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"ISMEAR": 0, "SIGMA": 0.05})
     """
     params = {k: v for k, v in locals().items() if v is not None}
+    params["user_id"] = get_user_id(ctx)
     payload = SCFInput(**params).model_dump(mode="json", by_alias=True)
     return await client.submit_scf(payload)
 
 
 @mcp.tool()
 async def submit_dos_calculation(
-    user_id: str,
     calc_type: str,
     formula: Optional[str] = None,
     cif_url: Optional[str] = None,
@@ -174,13 +179,13 @@ async def submit_dos_calculation(
     kpoint_density: Optional[float] = None,
     kpoint_multiplier: Optional[float] = None,
     precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None
+    custom_incar: Optional[Dict[str, Any]] = None,
+    ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
     提交态密度计算任务，返回任务信息。
     
     参数说明:
-    - user_id (必填): 用户ID
     - calc_type (必填): 计算类型，同结构优化
     - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和scf_task_id三选一
     - cif_url (可选): CIF文件的URL地址，与formula和scf_task_id三选一  
@@ -203,13 +208,13 @@ async def submit_dos_calculation(
     submit_dos_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"LORBIT": 11, "NEDOS": 3000})
     """
     params = {k: v for k, v in locals().items() if v is not None}
+    params["user_id"] = get_user_id(ctx)
     payload = DOSInput(**params).model_dump(mode="json", by_alias=True)
     return await client.submit_dos(payload)
 
 
 @mcp.tool()
 async def submit_md_calculation(
-    user_id: str,
     calc_type: str,
     formula: Optional[str] = None,
     cif_url: Optional[str] = None,
@@ -227,13 +232,13 @@ async def submit_md_calculation(
     time_step: Optional[float] = None,
     ensemble: Optional[str] = None,
     precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None
+    custom_incar: Optional[Dict[str, Any]] = None,
+    ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
     提交分子动力学计算任务，返回任务信息。
     
     参数说明:
-    - user_id (必填): 用户ID
     - calc_type (必填): 计算类型，同结构优化
     - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和scf_task_id三选一
     - cif_url (可选): CIF文件的URL地址，与formula和scf_task_id三选一
@@ -267,18 +272,20 @@ async def submit_md_calculation(
     submit_md_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"SMASS": 1, "POTIM": 0.5, "ISYM": 0})
     """
     params = {k: v for k, v in locals().items() if v is not None}
+    params["user_id"] = get_user_id(ctx)
     payload = MDInput(**params).model_dump(mode="json", by_alias=True)
     return await client.submit_md(payload)
 
 
 @mcp.tool()
-async def get_task_status(task_id: str, user_id: str) -> Dict[str, Any]:
+async def get_task_status(task_id: str, 
+ctx: Context = None #type: ignore
+) -> Dict[str, Any]:
     """
     查询任务状态。
     
     参数说明:
     - task_id (必填): 任务ID，由提交任务时返回
-    - user_id (必填): 用户ID，必须与提交任务时的用户ID一致
     
     返回信息包含:
     - status: 任务状态("queued"/"running"/"completed"/"failed"/"canceled")
@@ -296,33 +303,35 @@ async def get_task_status(task_id: str, user_id: str) -> Dict[str, Any]:
       * subtask_status: 各温度点详细状态列表
     
     示例:
-    get_task_status("task_001", "user123")
+    get_task_status("task_001")
     """
-    return await client.get_task_status(task_id, user_id)
+    return await client.get_task_status(task_id, get_user_id(ctx))
 
 
 @mcp.tool()
-async def cancel_task(task_id: str, user_id: str) -> Dict[str, Any]:
+async def cancel_task(task_id: str, 
+ctx: Context = None #type: ignore
+) -> Dict[str, Any]:
     """
     取消正在运行或排队的任务。
     
     参数说明:
     - task_id (必填): 要取消的任务ID
-    - user_id (必填): 用户ID，必须与提交任务时的用户ID一致
     
     示例:
     cancel_task("task_001", "user123")
     """
-    return await client.cancel_task(task_id, user_id)
+    return await client.cancel_task(task_id, get_user_id(ctx))
 
 
 @mcp.tool()
-async def list_user_tasks(user_id: str) -> Any:
+async def list_user_tasks(
+ctx: Context = None #type: ignore
+) -> Any:
     """
     列出用户的所有任务。
     
     参数说明:
-    - user_id (必填): 用户ID
     
     返回任务列表，每个任务包含:
     - task_id: 任务ID
@@ -332,19 +341,20 @@ async def list_user_tasks(user_id: str) -> Any:
     - updated_at: 更新时间
     
     示例:
-    list_user_tasks("user123")
+    list_user_tasks()
     """
-    return await client.list_tasks(user_id)
+    return await client.list_tasks(get_user_id(ctx))
 
 
 @mcp.tool()
-async def get_task_result(task_id: str, user_id: str) -> Dict[str, Any]:
+async def get_task_result(task_id: str, 
+ctx: Context = None #type: ignore
+) -> Dict[str, Any]:
     """
     获取已完成任务的结果路径信息。
     
     参数说明:
     - task_id (必填): 已完成的任务ID
-    - user_id (必填): 用户ID，必须与提交任务时的用户ID一致
     
     返回结果路径信息，包含:
     - result_path: 结果文件所在目录路径
@@ -353,17 +363,18 @@ async def get_task_result(task_id: str, user_id: str) -> Dict[str, Any]:
     示例:
     get_task_result("task_001", "user123")
     """
-    return await client.get_task_result(task_id, user_id)
+    return await client.get_task_result(task_id, get_user_id(ctx))
 
 
 @mcp.tool()
-async def get_md_result(task_id: str, user_id: str) -> Dict[str, Any]:
+async def get_md_result(task_id: str, 
+ctx: Context = None #type: ignore
+) -> Dict[str, Any]:
     """
     获取分子动力学任务的详细计算结果。
     
     参数说明:
     - task_id (必填): 已完成的MD任务ID
-    - user_id (必填): 用户ID，必须与提交任务时的用户ID一致
     
     返回详细MD结果，包含:
     
@@ -396,7 +407,7 @@ async def get_md_result(task_id: str, user_id: str) -> Dict[str, Any]:
     示例:
     get_md_result("md_task_001", "user123")
     """
-    return await client.get_md_result(task_id, user_id)
+    return await client.get_md_result(task_id, get_user_id(ctx))
 
 
 @mcp.tool()
