@@ -3,7 +3,8 @@ from typing import Optional
 BASE_URL = "http://localhost:8130"
 DOWNLOAD_URL = "/data/home/ysl9527/vasp_calculations"
 MCP_PORT = 8130
-VASP_SERVER_BASE_URL = "http://localhost:8135"
+# VASP_SERVER_BASE_URL = "http://localhost:8135"
+VASP_SERVER_BASE_URL = "http://47.99.180.80/vasp_server"
 VASP_SERVER_PORT = 8135
 from pathlib import Path
 
