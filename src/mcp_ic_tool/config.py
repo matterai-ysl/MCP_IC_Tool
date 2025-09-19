@@ -3,17 +3,17 @@ from typing import Optional
 BASE_URL = "http://localhost:8130"
 DOWNLOAD_URL = "/data/home/ysl9527/vasp_calculations"
 MCP_PORT = 8130
-# VASP_SERVER_BASE_URL = "http://localhost:8135"
-VASP_SERVER_BASE_URL = "http://47.99.180.80/vasp_server"
+VASP_SERVER_BASE_URL = "http://localhost:8135"
+VASP_SERVER_BASE_File_URL = "https://47.99.180.80/vasp_server"
 VASP_SERVER_PORT = 8135
 from pathlib import Path
 
 
 def get_download_url(path:str):
-    return f"{VASP_SERVER_BASE_URL}/vasp/download/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
+    return f"{VASP_SERVER_BASE_File_URL}/vasp/download/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
 
 def get_static_url(path:str):
-    return f"{VASP_SERVER_BASE_URL}/vasp/static/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
+    return f"{VASP_SERVER_BASE_File_URL}/vasp/static/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
 
 def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return os.environ.get(name, default)
