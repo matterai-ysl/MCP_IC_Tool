@@ -10,7 +10,7 @@ import time
 
 from .mp import download_with_criteria
 from .base import cif_to_poscar
-from .Config import get_path_config, get_kpoints_config,get_static_url
+from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url
 from typing import TYPE_CHECKING, Callable
 import importlib
 
@@ -1518,8 +1518,6 @@ echo "VASP计算完成
                 optimized_structure = str(contcar_path)
             
             # 生成可视化分析报告（仅对结构优化任务）
-            html_report_path = None
-            analysis_data = None
             try:
                 from .optimization_analyzer import generate_optimization_report, OUTCARAnalyzer
                 if outcar_path.exists():
@@ -1538,7 +1536,7 @@ echo "VASP计算完成
                 'convergence': convergence,
                 'energy': energy,
                 'final_forces': forces,
-                'optimized_structure': optimized_structure,
+                'optimized_structure_download_url': get_download_url(optimized_structure), #type: ignore
                 'computation_time': vasp_result.get('computation_time'),
                 'process_id': vasp_result.get('process_id'),
                 'work_directory': str(work_dir)
@@ -1552,8 +1550,20 @@ echo "VASP计算完成
             # 如果生成了分析数据，添加到结果中
             if analysis_data:
                 result['analysis_data'] = analysis_data
-            
-            return result
+            #简化返回结果
+            simplified_result = {
+                'success': result['success'],
+                # 'energy': result['energy'],
+                'force_convergence': result['analysis_data']['force_convergence']["converged"],
+                'final_max_force': result['analysis_data']['force_convergence']["final_max_force"],
+                'energy_convergence': result['analysis_data']['energy_convergence']["converged"],
+                'final_energy': result['analysis_data']['energy_convergence']["final_energy"],
+                # 'final_forces': result['final_forces'],
+                'optimized_structure_download_url': result['optimized_structure_download_url'],
+                'computation_time': result['computation_time'],
+                'analysis_report_html_path': result['analysis_report_html_path'],
+            }
+            return simplified_result
             
         except Exception as e:
             return {
