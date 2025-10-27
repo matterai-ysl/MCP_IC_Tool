@@ -11,42 +11,42 @@ mcp = FastMCP("VASP-MCP")
 client = VaspAPIClient()
 
 
-# 自定义INCAR参数使用说明
+# Custom INCAR parameter usage guide
 CUSTOM_INCAR_HELP = """
-自定义INCAR参数功能使用说明:
+Custom INCAR Parameter Usage Guide:
 
-custom_incar参数允许智能体直接指定VASP计算的INCAR参数，提供最大的灵活性。
+The custom_incar parameter allows agents to directly specify VASP calculation INCAR parameters, providing maximum flexibility.
 
-常用INCAR参数示例:
-- 电子结构参数:
-  * EDIFF: 电子收敛精度 (如: 1e-6, 1e-7)
-  * NELM: 最大电子步数 (如: 100, 200)
-  * ALGO: 算法选择 (如: "Fast", "Normal", "Very_Fast")
-  * ISMEAR: 展宽方法 (如: 0, -5)
-  * SIGMA: 展宽参数 (如: 0.05, 0.1)
+Common INCAR Parameter Examples:
+- Electronic structure parameters:
+  * EDIFF: Electronic convergence precision (e.g.: 1e-6, 1e-7)
+  * NELM: Maximum electronic steps (e.g.: 100, 200)
+  * ALGO: Algorithm selection (e.g.: "Fast", "Normal", "Very_Fast")
+  * ISMEAR: Smearing method (e.g.: 0, -5)
+  * SIGMA: Smearing parameter (e.g.: 0.05, 0.1)
 
-- DOS计算专用:
-  * LORBIT: 轨道投影 (如: 11, 12)
-  * NEDOS: 能量网格点数 (如: 2000, 3000)
-  * EMIN/EMAX: 能量范围 (如: -20, 10)
+- DOS calculation specific:
+  * LORBIT: Orbital projection (e.g.: 11, 12)
+  * NEDOS: Energy grid points (e.g.: 2000, 3000)
+  * EMIN/EMAX: Energy range (e.g.: -20, 10)
 
-- MD计算专用:
-  * SMASS: 热浴质量 (如: 0, 1)
-  * POTIM: 时间步长 (如: 0.5, 1.0)
-  * ISYM: 对称性 (如: 0关闭, 1开启)
-  * MDALGO: MD算法 (如: 1,2,3)
+- MD calculation specific:
+  * SMASS: Thermostat mass (e.g.: 0, 1)
+  * POTIM: Time step (e.g.: 0.5, 1.0)
+  * ISYM: Symmetry (e.g.: 0 off, 1 on)
+  * MDALGO: MD algorithm (e.g.: 1,2,3)
 
-- 优化计算:
-  * EDIFFG: 力收敛精度 (如: -0.01, -0.02)
-  * IBRION: 离子运动方法 (如: 1,2,3)
-  * ISIF: 应力张量 (如: 2,3,7)
+- Optimization calculation:
+  * EDIFFG: Force convergence precision (e.g.: -0.01, -0.02)
+  * IBRION: Ion movement method (e.g.: 1,2,3)
+  * ISIF: Stress tensor (e.g.: 2,3,7)
 
-使用方式:
-custom_incar参数接受字典格式，键为INCAR参数名，值为参数值。
-参数名不区分大小写，会自动转换为大写。
-自定义参数会覆盖默认生成的同名参数。
+Usage:
+The custom_incar parameter accepts a dictionary format, with keys as INCAR parameter names and values as parameter values.
+Parameter names are case-insensitive and will be automatically converted to uppercase.
+Custom parameters will override default parameters with the same name.
 
-示例:
+Examples:
 {"custom_incar": {"EDIFF": 1e-7, "NELM": 100, "ALGO": "Fast"}}
 {"custom_incar": {"LORBIT": 11, "NEDOS": 3000, "ISMEAR": -5}}
 {"custom_incar": {"SMASS": 1, "POTIM": 0.5, "ISYM": 0}}
@@ -76,29 +76,29 @@ async def submit_structure_optimization(
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    提交结构优化任务，返回任务信息。
-    
-    参数说明:
-    - calc_type (必填): 计算类型，可选值:
-      * "OXC" - 氧化物/硫化物固体电解质
-      * "SSE" - 固体电解质(等同于OXC)
-      * "ORC" - 氧化物还原催化剂
-      * "ECAT_OER" - 氧析出反应催化剂
-      * "ECAT_HER" - 氢析出反应催化剂
-    - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url二选一
-    - cif_url (可选): CIF文件的URL地址，与formula二选一
-    - spacegroup (可选): 空间群符号，如"P1", "Fm-3m"，仅当使用formula时有效，用于筛选结构
-    - max_energy_above_hull (可选): 最大能量上凸包距离(eV/atom)，默认0.1，仅当使用formula时有效，用于筛选结构
-    - min_band_gap (可选): 最小带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_band_gap (可选): 最大带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_nsites (可选): 最大原子数，仅当使用formula时有效，用于筛选结构
-    - min_nsites (可选): 最小原子数，仅当使用formula时有效，用于筛选结构
-    - stable_only (可选): 只选择稳定材料，默认true，仅当使用formula时有效，用于筛选结构
-    - selection_mode (可选): 选择模式，可选"auto"/"stable"/"first"，仅当使用formula时有效，用于筛选结构
-    - kpoint_density (可选): K点密度参数，默认30.0
-    - custom_incar (可选): 自定义INCAR参数字典，用于覆盖或添加特定的VASP计算参数
-    
-    示例:
+    Submit a structure optimization task and return task information.
+
+    Parameters:
+    - calc_type (required): Calculation type, options:
+      * "OXC" - Oxide/sulfide solid electrolyte
+      * "SSE" - Solid electrolyte (equivalent to OXC)
+      * "ORC" - Oxide reduction catalyst
+      * "ECAT_OER" - Oxygen evolution reaction catalyst
+      * "ECAT_HER" - Hydrogen evolution reaction catalyst
+    - formula (optional): Chemical formula, e.g. 'Li2O', 'LiFePO4', choose one between formula and cif_url
+    - cif_url (optional): URL address of CIF file, choose one between formula and cif_url
+    - spacegroup (optional): Space group symbol, e.g. "P1", "Fm-3m", only valid when using formula, used for structure filtering
+    - max_energy_above_hull (optional): Maximum energy above hull (eV/atom), default 0.1, only valid when using formula, used for structure filtering
+    - min_band_gap (optional): Minimum band gap (eV), only valid when using formula, used for structure filtering
+    - max_band_gap (optional): Maximum band gap (eV), only valid when using formula, used for structure filtering
+    - max_nsites (optional): Maximum number of atoms, only valid when using formula, used for structure filtering
+    - min_nsites (optional): Minimum number of atoms, only valid when using formula, used for structure filtering
+    - stable_only (optional): Only select stable materials, default true, only valid when using formula, used for structure filtering
+    - selection_mode (optional): Selection mode, options "auto"/"stable"/"first", only valid when using formula, used for structure filtering
+    - kpoint_density (optional): K-point density parameter, default 30.0
+    - custom_incar (optional): Custom INCAR parameter dictionary for overriding or adding specific VASP calculation parameters
+
+    Examples:
     submit_structure_optimization(calc_type="OXC", formula="Li2O", kpoint_density=25.0)
     submit_structure_optimization(calc_type="OXC", formula="Li2O", custom_incar={"EDIFF": 1e-7, "NELM": 100, "ALGO": "Fast"})
     """
@@ -133,26 +133,26 @@ async def submit_scf_calculation(
 
 ) -> Dict[str, Any]:
     """
-    提交自洽场计算任务，返回任务信息。
-    
-    参数说明:
-    - calc_type (必填): 计算类型，同结构优化
-    - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和optimized_task_id三选一
-    - cif_url (可选): CIF文件的URL地址，与formula和optimized_task_id三选一
-    - optimized_task_id (可选): 已完成的结构优化任务ID，与formula和cif_url三选一
-    - spacegroup (可选): 空间群符号，仅当使用formula时有效
-    - max_energy_above_hull (可选): 最大能量上凸包距离(eV/atom)，默认0.1，仅当使用formula时有效，用于筛选结构
-    - min_band_gap (可选): 最小带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_band_gap (可选): 最大带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_nsites (可选): 最大原子数，仅当使用formula时有效，用于筛选结构
-    - min_nsites (可选): 最小原子数，仅当使用formula时有效，用于筛选结构
-    - stable_only (可选): 只选择稳定材料，默认true，仅当使用formula时有效，用于筛选结构
-    - selection_mode (可选): 选择模式，可选"auto"/"stable"/"first"，仅当使用formula时有效，用于筛选结构
-    - kpoint_density (可选): K点密度参数，默认30.0
-    - precision (可选): 计算精度，可选"Normal"/"High"/"Accurate"，默认"Accurate"
-    - custom_incar (可选): 自定义INCAR参数字典，用于覆盖或添加特定的VASP计算参数
-    
-    示例:
+    Submit a self-consistent field calculation task and return task information.
+
+    Parameters:
+    - calc_type (required): Calculation type, same as structure optimization
+    - formula (optional): Chemical formula, e.g. 'Li2O', 'LiFePO4', choose one among formula, cif_url, and optimized_task_id
+    - cif_url (optional): URL address of CIF file, choose one among formula, cif_url, and optimized_task_id
+    - optimized_task_id (optional): Completed structure optimization task ID, choose one among formula, cif_url, and optimized_task_id
+    - spacegroup (optional): Space group symbol, only valid when using formula
+    - max_energy_above_hull (optional): Maximum energy above hull (eV/atom), default 0.1, only valid when using formula, used for structure filtering
+    - min_band_gap (optional): Minimum band gap (eV), only valid when using formula, used for structure filtering
+    - max_band_gap (optional): Maximum band gap (eV), only valid when using formula, used for structure filtering
+    - max_nsites (optional): Maximum number of atoms, only valid when using formula, used for structure filtering
+    - min_nsites (optional): Minimum number of atoms, only valid when using formula, used for structure filtering
+    - stable_only (optional): Only select stable materials, default true, only valid when using formula, used for structure filtering
+    - selection_mode (optional): Selection mode, options "auto"/"stable"/"first", only valid when using formula, used for structure filtering
+    - kpoint_density (optional): K-point density parameter, default 30.0
+    - precision (optional): Calculation precision, options "Normal"/"High"/"Accurate", default "Accurate"
+    - custom_incar (optional): Custom INCAR parameter dictionary for overriding or adding specific VASP calculation parameters
+
+    Examples:
     submit_scf_calculation(user_id="user123", calc_type="OXC", optimized_task_id="task_001", precision="High")
     submit_scf_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"ISMEAR": 0, "SIGMA": 0.05})
     """
@@ -183,27 +183,27 @@ async def submit_dos_calculation(
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    提交态密度计算任务，返回任务信息。
-    
-    参数说明:
-    - calc_type (必填): 计算类型，同结构优化
-    - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和scf_task_id三选一
-    - cif_url (可选): CIF文件的URL地址，与formula和scf_task_id三选一  
-    - scf_task_id (可选): 已完成的自洽场计算任务ID，与formula和cif_url三选一
-    - spacegroup (可选): 空间群符号，仅当使用formula时有效
-    - max_energy_above_hull (可选): 最大能量上凸包距离(eV/atom)，默认0.1
-    - min_band_gap (可选): 最小带隙(eV)
-    - max_band_gap (可选): 最大带隙(eV)
-    - max_nsites (可选): 最大原子数
-    - min_nsites (可选): 最小原子数
-    - stable_only (可选): 只选择稳定材料，默认true
-    - selection_mode (可选): 选择模式，可选"auto"/"stable"/"first"
-    - kpoint_density (可选): K点密度参数，默认30.0
-    - kpoint_multiplier (可选): K点倍增因子，相对于优化计算，默认2.0
-    - precision (可选): 计算精度，可选"Normal"/"High"/"Accurate"，默认"Accurate"
-    - custom_incar (可选): 自定义INCAR参数字典，用于覆盖或添加特定的VASP计算参数
-    
-    示例:
+    Submit a density of states calculation task and return task information.
+
+    Parameters:
+    - calc_type (required): Calculation type, same as structure optimization
+    - formula (optional): Chemical formula, e.g. 'Li2O', 'LiFePO4', choose one among formula, cif_url, and scf_task_id
+    - cif_url (optional): URL address of CIF file, choose one among formula, cif_url, and scf_task_id
+    - scf_task_id (optional): Completed self-consistent field calculation task ID, choose one among formula, cif_url, and scf_task_id
+    - spacegroup (optional): Space group symbol, only valid when using formula
+    - max_energy_above_hull (optional): Maximum energy above hull (eV/atom), default 0.1
+    - min_band_gap (optional): Minimum band gap (eV)
+    - max_band_gap (optional): Maximum band gap (eV)
+    - max_nsites (optional): Maximum number of atoms
+    - min_nsites (optional): Minimum number of atoms
+    - stable_only (optional): Only select stable materials, default true
+    - selection_mode (optional): Selection mode, options "auto"/"stable"/"first"
+    - kpoint_density (optional): K-point density parameter, default 30.0
+    - kpoint_multiplier (optional): K-point multiplier factor relative to optimization calculation, default 2.0
+    - precision (optional): Calculation precision, options "Normal"/"High"/"Accurate", default "Accurate"
+    - custom_incar (optional): Custom INCAR parameter dictionary for overriding or adding specific VASP calculation parameters
+
+    Examples:
     submit_dos_calculation(user_id="user123", calc_type="OXC", scf_task_id="scf_001", kpoint_multiplier=3.0)
     submit_dos_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"LORBIT": 11, "NEDOS": 3000})
     """
@@ -236,37 +236,37 @@ async def submit_md_calculation(
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    提交分子动力学计算任务，返回任务信息。
-    
-    参数说明:
-    - calc_type (必填): 计算类型，同结构优化
-    - formula (可选): 化学式，如'Li2O', 'LiFePO4'，与cif_url和scf_task_id三选一
-    - cif_url (可选): CIF文件的URL地址，与formula和scf_task_id三选一
-    - scf_task_id (可选): 已完成的自洽场计算任务ID，与formula和cif_url三选一
-    - spacegroup (可选): 空间群符号，仅当使用formula时有效
-    - max_energy_above_hull (可选): 最大能量上凸包距离(eV/atom)，默认0.1，仅当使用formula时有效，用于筛选结构
-    - min_band_gap (可选): 最小带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_band_gap (可选): 最大带隙(eV)，仅当使用formula时有效，用于筛选结构
-    - max_nsites (可选): 最大原子数，仅当使用formula时有效，用于筛选结构
-    - min_nsites (可选): 最小原子数，仅当使用formula时有效，用于筛选结构
-    - stable_only (可选): 只选择稳定材料，默认true，仅当使用formula时有效，用于筛选结构
-    - selection_mode (可选): 选择模式，可选"auto"/"stable"/"first"，仅当使用formula时有效，用于筛选结构
-    - md_steps (可选): MD步数，默认1000
-    - temperature (可选): 目标温度(K)，支持单个温度或温度列表进行多温度扫描
-      * 单温度: 300.0
-      * 多温度: [200.0, 300.0, 400.0, 500.0] - 将为每个温度创建子任务
-    - time_step (可选): 时间步长(fs)，默认1.0
-    - ensemble (可选): 系综类型，可选"NVT"/"NVE"/"NPT"，默认"NVT"
-    - precision (可选): 计算精度，可选"Normal"/"High"/"Accurate"，默认"Normal"
-    - custom_incar (可选): 自定义INCAR参数字典，用于覆盖或添加特定的VASP计算参数
-    
-    🌡️ 多温度MD计算特性:
-    - 每个温度点创建独立的子目录 (如: T_300K/, T_400K/)
-    - 所有子任务共享相同的任务ID，便于管理
-    - 支持子任务独立成功/失败状态
-    - 自动生成多温度汇总分析报告
-    
-    示例:
+    Submit a molecular dynamics calculation task and return task information.
+
+    Parameters:
+    - calc_type (required): Calculation type, same as structure optimization
+    - formula (optional): Chemical formula, e.g. 'Li2O', 'LiFePO4', choose one among formula, cif_url, and scf_task_id
+    - cif_url (optional): URL address of CIF file, choose one among formula, cif_url, and scf_task_id
+    - scf_task_id (optional): Completed self-consistent field calculation task ID, choose one among formula, cif_url, and scf_task_id
+    - spacegroup (optional): Space group symbol, only valid when using formula
+    - max_energy_above_hull (optional): Maximum energy above hull (eV/atom), default 0.1, only valid when using formula, used for structure filtering
+    - min_band_gap (optional): Minimum band gap (eV), only valid when using formula, used for structure filtering
+    - max_band_gap (optional): Maximum band gap (eV), only valid when using formula, used for structure filtering
+    - max_nsites (optional): Maximum number of atoms, only valid when using formula, used for structure filtering
+    - min_nsites (optional): Minimum number of atoms, only valid when using formula, used for structure filtering
+    - stable_only (optional): Only select stable materials, default true, only valid when using formula, used for structure filtering
+    - selection_mode (optional): Selection mode, options "auto"/"stable"/"first", only valid when using formula, used for structure filtering
+    - md_steps (optional): Number of MD steps, default 1000
+    - temperature (optional): Target temperature (K), supports single temperature or temperature list for multi-temperature scan
+      * Single temperature: 300.0
+      * Multi-temperature: [200.0, 300.0, 400.0, 500.0] - will create subtasks for each temperature
+    - time_step (optional): Time step (fs), default 1.0
+    - ensemble (optional): Ensemble type, options "NVT"/"NVE"/"NPT", default "NVT"
+    - precision (optional): Calculation precision, options "Normal"/"High"/"Accurate", default "Normal"
+    - custom_incar (optional): Custom INCAR parameter dictionary for overriding or adding specific VASP calculation parameters
+
+    Multi-temperature MD calculation features:
+    - Create independent subdirectories for each temperature point (e.g.: T_300K/, T_400K/)
+    - All subtasks share the same task ID for easy management
+    - Support independent success/failure status for subtasks
+    - Automatically generate multi-temperature summary analysis report
+
+    Examples:
     submit_md_calculation(user_id="user123", calc_type="OXC", formula="Li2O", md_steps=2000, temperature=350.0, ensemble="NPT")
     submit_md_calculation(user_id="user123", calc_type="OXC", formula="Li2O", temperature=[300.0, 400.0, 500.0], md_steps=1500)
     submit_md_calculation(user_id="user123", calc_type="OXC", formula="Li2O", custom_incar={"SMASS": 1, "POTIM": 0.5, "ISYM": 0})
@@ -282,27 +282,27 @@ async def get_task_status(task_id: str,
 ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    查询任务状态。
-    
-    参数说明:
-    - task_id (必填): 任务ID，由提交任务时返回
-    
-    返回信息包含:
-    - status: 任务状态("queued"/"running"/"completed"/"failed"/"canceled")
-    - progress: 进度百分比(0-100)
-    - result_path: 结果文件路径(完成时)
-    - error_message: 错误信息(失败时)
-    - result_data: 详细结果数据
-    
-    🌡️ 对于多温度MD任务，result_data还包含:
-    - multi_temperature_info: 多温度子任务状态汇总
-      * is_multi_temperature: 是否为多温度计算
-      * total_subtasks: 子任务总数
-      * completed_subtasks: 完成的子任务数
-      * failed_subtasks: 失败的子任务数
-      * subtask_status: 各温度点详细状态列表
-    
-    示例:
+    Query task status.
+
+    Parameters:
+    - task_id (required): Task ID, returned when submitting the task
+
+    Return information contains:
+    - status: Task status ("queued"/"running"/"completed"/"failed"/"canceled")
+    - progress: Progress percentage (0-100)
+    - result_path: Result file path (when completed)
+    - error_message: Error message (when failed)
+    - result_data: Detailed result data
+
+    For multi-temperature MD tasks, result_data also includes:
+    - multi_temperature_info: Multi-temperature subtask status summary
+      * is_multi_temperature: Whether it is a multi-temperature calculation
+      * total_subtasks: Total number of subtasks
+      * completed_subtasks: Number of completed subtasks
+      * failed_subtasks: Number of failed subtasks
+      * subtask_status: Detailed status list for each temperature point
+
+    Examples:
     get_task_status("task_001")
     """
     return await client.get_task_status(task_id, get_user_id(ctx))
@@ -313,12 +313,12 @@ async def cancel_task(task_id: str,
 ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    取消正在运行或排队的任务。
-    
-    参数说明:
-    - task_id (必填): 要取消的任务ID
-    
-    示例:
+    Cancel a running or queued task.
+
+    Parameters:
+    - task_id (required): Task ID to cancel
+
+    Examples:
     cancel_task("task_001", "user123")
     """
     return await client.cancel_task(task_id, get_user_id(ctx))
@@ -329,18 +329,18 @@ async def list_user_tasks(
 ctx: Context = None #type: ignore
 ) -> Any:
     """
-    列出用户的所有任务。
-    
-    参数说明:
-    
-    返回任务列表，每个任务包含:
-    - task_id: 任务ID
-    - task_type: 任务类型("structure_optimization"/"scf_calculation"/"dos_calculation"/"md_calculation")
-    - status: 任务状态
-    - created_at: 创建时间
-    - updated_at: 更新时间
-    
-    示例:
+    List all tasks for the user.
+
+    Parameters:
+
+    Returns a task list, each task contains:
+    - task_id: Task ID
+    - task_type: Task type ("structure_optimization"/"scf_calculation"/"dos_calculation"/"md_calculation")
+    - status: Task status
+    - created_at: Creation time
+    - updated_at: Update time
+
+    Examples:
     list_user_tasks()
     """
     return await client.list_tasks(get_user_id(ctx))
@@ -351,16 +351,16 @@ async def get_task_result(task_id: str,
 ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    获取已完成任务的结果路径信息。
-    
-    参数说明:
-    - task_id (必填): 已完成的任务ID
-    
-    返回结果路径信息，包含:
-    - result_path: 结果文件所在目录路径
-    - message: 结果描述信息
-    
-    示例:
+    Get result path information for a completed task.
+
+    Parameters:
+    - task_id (required): Completed task ID
+
+    Returns result path information, including:
+    - result_path: Directory path where result files are located
+    - message: Result description
+
+    Examples:
     get_task_result("task_001", "user123")
     """
     return await client.get_task_result(task_id, get_user_id(ctx))
@@ -371,40 +371,40 @@ async def get_md_result(task_id: str,
 ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    获取分子动力学任务的详细计算结果。
-    
-    参数说明:
-    - task_id (必填): 已完成的MD任务ID
-    
-    返回详细MD结果，包含:
-    
-    📊 基本信息:
-    - is_multi_temperature: 是否为多温度计算
-    - total_subtasks: 子任务总数
-    - completed_subtasks: 完成的子任务数
-    - failed_subtasks: 失败的子任务数
-    - convergence: 整体是否成功完成
-    - computation_time: 总计算耗时(秒)
-    
-    🌡️ 多温度计算专用:
-    - subtask_results: 各温度点详细结果列表，每项包含:
-      * temperature: 温度(K)
-      * subtask_dir: 子任务目录
-      * md_structure: 初始结构文件路径
-      * xdatcar_path: 轨迹文件路径(XDATCAR)
-      * oszicar_path: 能量文件路径(OSZICAR)
-      * final_energy: 最终能量(eV)
-      * average_temperature: 平均温度(K)
-      * total_md_steps: 完成的MD步数
-      * convergence: 该温度点是否正常完成
-      * status: 子任务状态
-      * error_message: 错误信息(如有)
-    
-    📈 分析报告:
-    - md_html_analysis_report: 多温度分析报告HTML文件路径
-    - md_output_dir: 分析输出目录
-    
-    示例:
+    Get detailed calculation results for a molecular dynamics task.
+
+    Parameters:
+    - task_id (required): Completed MD task ID
+
+    Returns detailed MD results, including:
+
+    Basic Information:
+    - is_multi_temperature: Whether it is a multi-temperature calculation
+    - total_subtasks: Total number of subtasks
+    - completed_subtasks: Number of completed subtasks
+    - failed_subtasks: Number of failed subtasks
+    - convergence: Whether the overall calculation completed successfully
+    - computation_time: Total computation time (seconds)
+
+    Multi-temperature calculation specific:
+    - subtask_results: Detailed results list for each temperature point, each contains:
+      * temperature: Temperature (K)
+      * subtask_dir: Subtask directory
+      * md_structure: Initial structure file path
+      * xdatcar_path: Trajectory file path (XDATCAR)
+      * oszicar_path: Energy file path (OSZICAR)
+      * final_energy: Final energy (eV)
+      * average_temperature: Average temperature (K)
+      * total_md_steps: Number of completed MD steps
+      * convergence: Whether this temperature point completed normally
+      * status: Subtask status
+      * error_message: Error message (if any)
+
+    Analysis Report:
+    - md_html_analysis_report: Multi-temperature analysis report HTML file path
+    - md_output_dir: Analysis output directory
+
+    Examples:
     get_md_result("md_task_001", "user123")
     """
     return await client.get_md_result(task_id, get_user_id(ctx))
@@ -413,15 +413,15 @@ ctx: Context = None #type: ignore
 @mcp.tool()
 async def get_custom_incar_help() -> str:
     """
-    获取自定义INCAR参数的详细使用说明和常用参数示例。
-    
-    这个工具提供了:
-    - custom_incar参数的使用方法
-    - 常用INCAR参数的详细说明
-    - 不同计算类型的推荐参数
-    - 实际使用示例
-    
-    调用此工具可以帮助智能体了解如何正确使用custom_incar参数来自定义VASP计算。
+    Get detailed usage instructions and common parameter examples for custom INCAR parameters.
+
+    This tool provides:
+    - Usage methods for the custom_incar parameter
+    - Detailed explanations of common INCAR parameters
+    - Recommended parameters for different calculation types
+    - Practical usage examples
+
+    Calling this tool can help agents understand how to correctly use the custom_incar parameter to customize VASP calculations.
     """
     return CUSTOM_INCAR_HELP
 

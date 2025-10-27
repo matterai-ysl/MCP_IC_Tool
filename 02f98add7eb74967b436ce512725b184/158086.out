@@ -1,0 +1,10 @@
+Loading vasp/6.3.2-intel
+  Loading requirement: oneapi/2023.2
+=== 作业信息 ===
+作业ID: 158086
+分区: p1
+节点数: 2
+总任务数: 56
+每节点任务数: 28
+节点列表: c[20011-20012]
+=== 开始VASP计算 ===

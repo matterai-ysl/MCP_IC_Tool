@@ -1,0 +1,35 @@
+# 基础控制
+SYSTEM = OPT
+PREC = High
+ENCUT = 520
+ISTART = 0
+ICHARG = 2
+# 电子迭代
+EDIFF = 1E-5
+EDIFFG = -0.01
+NELM = 100
+NELMIN = 2
+ALGO = Normal
+ISMEAR = 0
+SIGMA = 0.05
+# 结构优化
+IBRION = 2
+NSW = 500
+ISIF = 3
+POTIM = 0.2
+# 自旋极化与磁矩
+ISPIN = 2
+# 交换关联泛函
+GGA = PE
+# 并行与加速 
+LREAL = Auto
+# 输出控制
+LWAVE  = .FALSE.
+LCHARG = .FALSE.
+# LDA+U参数（自动添加）
+LDAU = .TRUE.
+LDAUTYPE = 2
+LMAXMIX = 4
+LDAUL = 2 -1 -1
+LDAUU = 4.0 0.0 0.0
+LDAUJ = 0.0 0.0 0.0

@@ -10,7 +10,7 @@ import time
 
 from .mp import download_with_criteria
 from .base import cif_to_poscar
-from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url
+from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
 from typing import TYPE_CHECKING, Callable
 import importlib
 
@@ -1516,54 +1516,78 @@ echo "VASP计算完成
             optimized_structure = None
             if contcar_path.exists():
                 optimized_structure = str(contcar_path)
-            
+
             # 生成可视化分析报告（仅对结构优化任务）
+            html_report_path = None
+            analysis_data = None
             try:
                 from .optimization_analyzer import generate_optimization_report, OUTCARAnalyzer
                 if outcar_path.exists():
                     # 生成分析数据
                     analyzer = OUTCARAnalyzer(str(work_dir), task_id="optimization")
                     analysis_data = analyzer.analyze()
-                    
+
                     # 生成HTML报告
                     html_report_path = generate_optimization_report(str(work_dir), "optimization")
                     print(f"📊 结构优化分析报告已生成: {html_report_path}")
             except Exception as e:
                 print(f"⚠️ 生成可视化分析报告失败: {e}")
-            
+
+            # 安全地生成下载URL（处理路径不在DOWNLOAD_URL下的情况）
+            optimized_structure_url = None
+            if optimized_structure:
+                try:
+                    # 检查路径是否在DOWNLOAD_URL下
+                    Path(optimized_structure).relative_to(DOWNLOAD_URL)
+                    optimized_structure_url = get_download_url(optimized_structure)
+                except ValueError:
+                    # 路径不在DOWNLOAD_URL下，使用绝对路径
+                    optimized_structure_url = optimized_structure
+
             result = {
                 'success': True,
                 'convergence': convergence,
                 'energy': energy,
                 'final_forces': forces,
-                'optimized_structure_download_url': get_download_url(optimized_structure), #type: ignore
-                'computation_time': vasp_result.get('computation_time'),
-                'process_id': vasp_result.get('process_id'),
+                'optimized_structure_download_url': optimized_structure_url,
+                'computation_time': vasp_result.get('computation_time',None),
+                'process_id': vasp_result.get('process_id',None),
                 'work_directory': str(work_dir)
             }
 
             # 如果生成了HTML报告，添加到结果中
             if html_report_path:
-                html_relative_path = get_static_url(html_report_path)
-                result['analysis_report_html_path'] = html_relative_path
+                try:
+                    # 检查路径是否在DOWNLOAD_URL下
+                    Path(html_report_path).relative_to(DOWNLOAD_URL)
+                    html_relative_path = get_static_url(html_report_path)
+                    result['analysis_report_html_path'] = html_relative_path
+                except ValueError:
+                    # 路径不在DOWNLOAD_URL下，使用绝对路径
+                    result['analysis_report_html_path'] = html_report_path
             
             # 如果生成了分析数据，添加到结果中
             if analysis_data:
                 result['analysis_data'] = analysis_data
-            #简化返回结果
-            simplified_result = {
-                'success': result['success'],
-                # 'energy': result['energy'],
-                'force_convergence': result['analysis_data']['force_convergence']["converged"],
-                'final_max_force': result['analysis_data']['force_convergence']["final_max_force"],
-                'energy_convergence': result['analysis_data']['energy_convergence']["converged"],
-                'final_energy': result['analysis_data']['energy_convergence']["final_energy"],
-                # 'final_forces': result['final_forces'],
-                'optimized_structure_download_url': result['optimized_structure_download_url'],
-                'computation_time': result['computation_time'],
-                'analysis_report_html_path': result['analysis_report_html_path'],
-            }
-            return simplified_result
+
+            # 简化返回结果
+            if analysis_data and 'convergence_analysis' in analysis_data:
+                # 使用详细分析数据
+                conv_analysis = analysis_data['convergence_analysis']
+                simplified_result = {
+                    'success': result['success'],
+                    'force_convergence': conv_analysis.get('force_convergence', {}).get("converged", False),
+                    'final_max_force': conv_analysis.get('force_convergence', {}).get("final_max_force", None),
+                    'energy_convergence': conv_analysis.get('energy_convergence', {}).get("converged", False),
+                    'final_energy': conv_analysis.get('energy_convergence', {}).get("final_energy", None),
+                    'optimized_structure_download_url': result['optimized_structure_download_url'],
+                    'computation_time': result['computation_time'],
+                    'analysis_report_html_path': result.get('analysis_report_html_path', None),
+                }
+                return simplified_result
+            else:
+                # 如果没有分析数据，返回基础结果
+                return result
             
         except Exception as e:
             return {
@@ -2693,3 +2717,4 @@ R² = {arrhenius_result["r_squared"]:.3f}
         """
         
         return html_content 
+
