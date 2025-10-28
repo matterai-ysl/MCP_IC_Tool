@@ -52,10 +52,8 @@ class VaspAPIClient:
             return resp.json()
 
     async def get_task_result(self, task_id: str, user_id: str) -> Dict[str, Any]:
-        return await self._aget(f"/vasp/task/{task_id}/result", {"user_id": user_id})
-
-    async def get_md_result(self, task_id: str, user_id: str) -> Dict[str, Any]:
-        return await self._aget(f"/vasp/task/{task_id}/md-result", {"user_id": user_id})
+        """Get task result - same as get_task_status (both use /vasp/task/{task_id} endpoint)"""
+        return await self._aget(f"/vasp/task/{task_id}", {"user_id": user_id})
 
 
 

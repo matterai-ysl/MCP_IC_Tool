@@ -278,11 +278,11 @@ async def submit_md_calculation(
 
 
 @mcp.tool()
-async def get_task_status(task_id: str, 
+async def get_task_status(task_id: str,
 ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
-    Query task status.
+    Query task status and result information.
 
     Parameters:
     - task_id (required): Task ID, returned when submitting the task
@@ -292,7 +292,7 @@ ctx: Context = None #type: ignore
     - progress: Progress percentage (0-100)
     - result_path: Result file path (when completed)
     - error_message: Error message (when failed)
-    - result_data: Detailed result data
+    - result_data: Detailed result data (includes all calculation results)
 
     For multi-temperature MD tasks, result_data also includes:
     - multi_temperature_info: Multi-temperature subtask status summary
@@ -344,70 +344,6 @@ ctx: Context = None #type: ignore
     list_user_tasks()
     """
     return await client.list_tasks(get_user_id(ctx))
-
-
-@mcp.tool()
-async def get_task_result(task_id: str, 
-ctx: Context = None #type: ignore
-) -> Dict[str, Any]:
-    """
-    Get result path information for a completed task.
-
-    Parameters:
-    - task_id (required): Completed task ID
-
-    Returns result path information, including:
-    - result_path: Directory path where result files are located
-    - message: Result description
-
-    Examples:
-    get_task_result("task_001", "user123")
-    """
-    return await client.get_task_result(task_id, get_user_id(ctx))
-
-
-@mcp.tool()
-async def get_md_result(task_id: str, 
-ctx: Context = None #type: ignore
-) -> Dict[str, Any]:
-    """
-    Get detailed calculation results for a molecular dynamics task.
-
-    Parameters:
-    - task_id (required): Completed MD task ID
-
-    Returns detailed MD results, including:
-
-    Basic Information:
-    - is_multi_temperature: Whether it is a multi-temperature calculation
-    - total_subtasks: Total number of subtasks
-    - completed_subtasks: Number of completed subtasks
-    - failed_subtasks: Number of failed subtasks
-    - convergence: Whether the overall calculation completed successfully
-    - computation_time: Total computation time (seconds)
-
-    Multi-temperature calculation specific:
-    - subtask_results: Detailed results list for each temperature point, each contains:
-      * temperature: Temperature (K)
-      * subtask_dir: Subtask directory
-      * md_structure: Initial structure file path
-      * xdatcar_path: Trajectory file path (XDATCAR)
-      * oszicar_path: Energy file path (OSZICAR)
-      * final_energy: Final energy (eV)
-      * average_temperature: Average temperature (K)
-      * total_md_steps: Number of completed MD steps
-      * convergence: Whether this temperature point completed normally
-      * status: Subtask status
-      * error_message: Error message (if any)
-
-    Analysis Report:
-    - md_html_analysis_report: Multi-temperature analysis report HTML file path
-    - md_output_dir: Analysis output directory
-
-    Examples:
-    get_md_result("md_task_001", "user123")
-    """
-    return await client.get_md_result(task_id, get_user_id(ctx))
 
 
 @mcp.tool()

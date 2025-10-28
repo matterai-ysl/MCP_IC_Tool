@@ -1502,33 +1502,44 @@ echo "VASP计算完成
         """分析计算结果"""
         try:
             # 检查收敛性
+            print(f"分析计算结果: {work_dir}")
             outcar_path = work_dir / "OUTCAR"
             convergence = self._check_convergence(outcar_path)
-            
+            print("收敛性: ", convergence)
+
             # 提取能量
+            print("提取能量: ", outcar_path)
             energy = self._extract_energy(outcar_path)
-            
+            print("能量: ", energy)
             # 提取力
+            print("提取力: ", outcar_path)
             forces = self._extract_forces(outcar_path)
-            
+            print("力: ", forces)
             # 复制优化后的结构
+            print("复制优化后的结构: ", work_dir)
             contcar_path = work_dir / "CONTCAR"
+            print("CONTCAR: ", contcar_path)
             optimized_structure = None
             if contcar_path.exists():
                 optimized_structure = str(contcar_path)
+                print("优化后的结构: ", optimized_structure)
 
             # 生成可视化分析报告（仅对结构优化任务）
+            print("生成可视化分析报告: ", work_dir)
             html_report_path = None
             analysis_data = None
             try:
                 from .optimization_analyzer import generate_optimization_report, OUTCARAnalyzer
                 if outcar_path.exists():
                     # 生成分析数据
+                    print("生成分析数据: ", work_dir)
                     analyzer = OUTCARAnalyzer(str(work_dir), task_id="optimization")
                     analysis_data = analyzer.analyze()
-
+                    print("分析数据: ", analysis_data)
                     # 生成HTML报告
+                    print("生成HTML报告: ", work_dir)
                     html_report_path = generate_optimization_report(str(work_dir), "optimization")
+                    print("HTML报告: ", html_report_path)
                     print(f"📊 结构优化分析报告已生成: {html_report_path}")
             except Exception as e:
                 print(f"⚠️ 生成可视化分析报告失败: {e}")
@@ -1574,6 +1585,7 @@ echo "VASP计算完成
             if analysis_data and 'convergence_analysis' in analysis_data:
                 # 使用详细分析数据
                 conv_analysis = analysis_data['convergence_analysis']
+                print("简化结果: ", conv_analysis)
                 simplified_result = {
                     'success': result['success'],
                     'force_convergence': conv_analysis.get('force_convergence', {}).get("converged", False),
