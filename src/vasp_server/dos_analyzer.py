@@ -648,7 +648,7 @@ class PyMatGenDOSAnalyzer:
             
             # 计算磁矩和自旋极化
             spin_diff = dos_up - dos_down
-            total_magnetization = np.trapezoid(spin_diff, energies)
+            total_magnetization = np.trapezoid(spin_diff, energies) #type: ignore
             
             # 自旋极化度
             spin_polarization = np.mean(np.abs(spin_diff) / (dos_up + dos_down + 1e-10))

@@ -4,19 +4,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from typing import List
 import uvicorn
+import logging
+import sys
 from pathlib import Path
 # Config import moved to __main__ block
 from .schemas import (
-    StructOptRequest, StructOptResponse, TaskStatusResponse, 
+    StructOptRequest, StructOptResponse, TaskStatusResponse,
     TaskStatus, SCFRequest, SCFResponse,
     DOSRequest, DOSResponse, MDRequest, MDResponse
 )
 from .task_manager.manager import TaskManager
 from .task_manager.database import check_and_init_db
 
+# 配置日志 - 包含线程信息，确保子线程日志也能正确输出
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # 输出到标准输出
+    ],
+    force=True  # 强制重新配置，覆盖已有配置
+)
+logger = logging.getLogger(__name__)
+
 # 初始化数据库
-print("🚀 启动VASP计算服务...")
-print("🔧 检查并初始化数据库...")
+logger.info("🚀 启动VASP计算服务...")
+logger.info("🔧 检查并初始化数据库...")
 check_and_init_db()
 
 app = FastAPI(title="VASP计算服务API", version="1.0.0")
@@ -32,7 +45,7 @@ app.add_middleware(
 
 # 挂载静态文件服务
 # 这将服务整个文件系统，需要小心安全性
-app.mount("/vasp/static", StaticFiles(directory="/data/home/ysl9527/vasp_calculations"), name="static")
+app.mount("/static", StaticFiles(directory="/data/home/ysl9527/vasp_calculations"), name="static")
 
 # 创建全局任务管理器实例
 task_manager = TaskManager()
@@ -403,19 +416,19 @@ async def get_task_status(task_id: str, user_id: str = Query(..., description="�
     """
     try:
         task = task_manager.get_task(task_id, user_id)
-        print(task)
+        logger.debug(f"Task object: {task}")
         # 打印 task 对象的所有属性和值（调试用）
-        print("\n" + "="*60)
-        print("🔍 DEBUG: task 对象完整属性清单")
-        print("="*60)
+        logger.debug("\n" + "="*60)
+        logger.debug("🔍 DEBUG: task 对象完整属性清单")
+        logger.debug("="*60)
         for attr in dir(task):
             if not attr.startswith('_'):  # 跳过私有属性
                 try:
                     value = getattr(task, attr)
-                    print(f"{attr}: {repr(value)} (类型: {type(value).__name__})")
+                    logger.debug(f"{attr}: {repr(value)} (类型: {type(value).__name__})")
                 except Exception as e:
-                    print(f"{attr}: ❌ 获取失败 - {e}")
-        print("="*60 + "\n")
+                    logger.debug(f"{attr}: ❌ 获取失败 - {e}")
+        logger.debug("="*60 + "\n")
         if not task:
             raise HTTPException(status_code=404, detail="任务未找到或无权限访问")
         
@@ -458,25 +471,25 @@ async def get_task_status(task_id: str, user_id: str = Query(..., description="�
         except (ValueError, AttributeError):
             # 如果状态值非法，设置默认状态
             response_data["status"] = TaskStatus.queued
-        
-        print("🔧 response_data内容:")
+
+        logger.debug("🔧 response_data内容:")
         for key, value in response_data.items():
-            print(f"  {key}: {repr(value)} (类型: {type(value).__name__})")
-        
+            logger.debug(f"  {key}: {repr(value)} (类型: {type(value).__name__})")
+
         try:
             result = TaskStatusResponse(**response_data)
-            print("✅ TaskStatusResponse创建成功")
+            logger.debug("✅ TaskStatusResponse创建成功")
             return result
         except Exception as validation_error:
-            print(f"❌ TaskStatusResponse创建失败: {validation_error}")
-            print(f"❌ 错误类型: {type(validation_error).__name__}")
+            logger.error(f"❌ TaskStatusResponse创建失败: {validation_error}")
+            logger.error(f"❌ 错误类型: {type(validation_error).__name__}")
             raise HTTPException(status_code=500, detail=f"响应模型验证失败: {str(validation_error)}")
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ 其他异常: {e}")
-        print(f"❌ 异常类型: {type(e).__name__}")
+        logger.error(f"❌ 其他异常: {e}")
+        logger.error(f"❌ 异常类型: {type(e).__name__}")
         raise HTTPException(status_code=500, detail=f"查询任务状态失败: {str(e)}")
 
 
@@ -543,36 +556,39 @@ async def list_user_tasks(user_id: str = Query(..., description="用户ID")):
         raise HTTPException(status_code=500, detail=f"获取任务列表失败: {str(e)}")
 
 
-@app.get("/vasp/download/{file_path:path}")
+@app.get("/download/file/{file_path:path}")
 async def download_file(file_path: str):
     """
     提供文件下载服务
-    
+
     Args:
         file_path: 相对于工作目录的文件路径
-        
+
     Returns:
         FileResponse: 文件下载响应
     """
     try:
-        full_path = Path(file_path)
-        
+        from .Config import DOWNLOAD_URL
+
+        # 将相对路径转换为绝对路径
+        full_path = Path(DOWNLOAD_URL) / file_path
+
         # 安全检查：确保文件路径在允许的范围内
         if not full_path.exists():
-            raise HTTPException(status_code=404, detail="文件不存在")
-        
+            raise HTTPException(status_code=404, detail=f"文件不存在: {full_path}")
+
         if not full_path.is_file():
             raise HTTPException(status_code=404, detail="路径不是文件")
-        
+
         # 获取文件名用于下载
         filename = full_path.name
-        
+
         return FileResponse(
-            full_path, 
+            full_path,
             filename=filename,
             media_type='application/octet-stream'
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:

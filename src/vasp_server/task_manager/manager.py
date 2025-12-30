@@ -1,6 +1,7 @@
 import threading
 import time
 import uuid
+import logging
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -8,6 +9,9 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import Task
 from ..vasp_worker import VaspWorker
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 
 class TaskManager:
@@ -64,7 +68,7 @@ class TaskManager:
                 # 如果提供了PID，则设置到任务中
                 if pid is not None:
                     task.process_id = pid  # type: ignore
-                    print(f"📝 任务 {task_id[:8]}... 的进程ID已设置: {pid}")
+                    logger.info(f"📝 任务 {task_id[:8]}... 的进程ID已设置: {pid}")
                 
                 db.add(task)
                 db.commit()
@@ -89,7 +93,11 @@ class TaskManager:
                             task_id, task.params or {}, progress_callback  # type: ignore
                         )
                     )
-                    
+
+                    logger.info("=" * 50)
+                    logger.info("📦 任务结果加入task")
+                    logger.info(f"Result: {result}")
+                    logger.info("=" * 50)
                     if result.get('success'):
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
@@ -104,6 +112,11 @@ class TaskManager:
                     else:
                         task.status = "failed"  # type: ignore
                         task.error_message = result.get('error', '计算失败')  # type: ignore
+
+                    # 立即提交到数据库
+                    db.add(task)
+                    db.commit()
+                    logger.info(f"✅ 任务 {task_id[:8]}... 结果已保存到数据库")
                 finally:
                     loop.close()
             elif str(task.task_type) == "scf_calculation":  # type: ignore
@@ -125,13 +138,16 @@ class TaskManager:
                             task_id, task.params or {}, progress_callback  # type: ignore
                         )
                     )
-                    
+                    print("--------------------------------")
+                    print("任务结果加入task")
+                    print("result: ", result)
+                    print("--------------------------------")
                     if result.get('success'):
                         task.status = "completed"  # type: ignore
                         task.progress = 100  # type: ignore
                         task.result_path = result.get('work_directory')  # type: ignore
                         # 存储详细的结果数据
-                        task.result_data = self._prepare_result_data(result)  # type: ignore
+                        task.result_data = result  # type: ignore
                         task.error_message = None  # type: ignore
                         # 确保PID被设置（如果还没有设置的话）
                         if result.get('process_id') and not task.process_id:  # type: ignore
@@ -139,6 +155,11 @@ class TaskManager:
                     else:
                         task.status = "failed"  # type: ignore
                         task.error_message = result.get('error', '自洽场计算失败')  # type: ignore
+
+                    # 立即提交到数据库
+                    db.add(task)
+                    db.commit()
+                    logger.info(f"✅ SCF任务 {task_id[:8]}... 结果已保存到数据库")
                 finally:
                     loop.close()
             elif str(task.task_type) == "dos_calculation":  # type: ignore
@@ -175,6 +196,11 @@ class TaskManager:
                     else:
                         task.status = "failed"  # type: ignore
                         task.error_message = result.get('error', '态密度计算失败')  # type: ignore
+
+                    # 立即提交到数据库
+                    db.add(task)
+                    db.commit()
+                    logger.info(f"✅ DOS任务 {task_id[:8]}... 结果已保存到数据库")
                 finally:
                     loop.close()
             elif str(task.task_type) == "md_calculation":  # type: ignore
@@ -210,6 +236,11 @@ class TaskManager:
                     else:
                         task.status = "failed"  # type: ignore
                         task.error_message = result.get('error', '分子动力学计算失败')  # type: ignore
+
+                    # 立即提交到数据库
+                    db.add(task)
+                    db.commit()
+                    logger.info(f"✅ MD任务 {task_id[:8]}... 结果已保存到数据库")
                 finally:
                     loop.close()
             else:

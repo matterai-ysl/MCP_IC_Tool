@@ -2,6 +2,7 @@ import os
 import shutil
 import asyncio
 import traceback
+import logging
 from typing import Dict, Any, Optional, List
 import requests
 from pathlib import Path
@@ -13,6 +14,9 @@ from .base import cif_to_poscar
 from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
 from typing import TYPE_CHECKING, Callable
 import importlib
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     # 仅用于类型检查，避免运行时硬依赖
@@ -94,6 +98,9 @@ class VaspWorker:
             if progress_callback:
                 await progress_callback(100, "计算完成！")
                 
+            logger.info("=" * 50)
+            logger.info(f"📊 Final result: {final_result}")
+            logger.info("=" * 50)
             return final_result
             
         except Exception as e:
@@ -131,17 +138,25 @@ class VaspWorker:
             if progress_callback:
                 await progress_callback(30, "生成自洽场VASP输入文件...")
             await self._generate_scf_inputs(work_dir, params)
-            
+            print("--------------------------------")
+            print("自洽场VASP输入文件生成完成")
+            print("--------------------------------")
             # 3. 运行VASP自洽场计算
             if progress_callback:
                 await progress_callback(40, "开始VASP自洽场计算...")
             result = await self._run_vasp_calculation(work_dir, progress_callback)
-            
+            print("--------------------------------")
+            print("VASP自洽场计算完成")
+            print("result: ", result)
+            print("--------------------------------")
             # 4. 分析自洽场结果
             if progress_callback:
                 await progress_callback(90, "分析自洽场计算结果...")
             final_result = await self._analyze_scf_results(work_dir, result)
-            
+            print("--------------------------------")
+            print("自洽场计算结果分析完成")
+            print("final_result: ", final_result)
+            print("--------------------------------")
             if progress_callback:
                 await progress_callback(100, "自洽场计算完成！")
                 
@@ -1320,14 +1335,14 @@ LANGEVIN_GAMMA = 10.0
         
         # SLURM作业调度参数
         nodes = 2                    # 节点数
-        total_tasks = 56             # 总任务数
-        tasks_per_node = 28          # 每节点任务数
+        total_tasks = 80             # 总任务数
+        tasks_per_node = 40          # 每节点任务数
         
         script = f"""#!/bin/bash
-#SBATCH --job-name={work_dir.name}
-#SBATCH --partition=p1
 #SBATCH -N {nodes}
 #SBATCH -n {total_tasks}
+#SBATCH --job-name={work_dir.name}
+#SBATCH --partition=p1
 #SBATCH --ntasks-per-node={tasks_per_node}
 #SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00
@@ -1485,7 +1500,7 @@ echo "VASP计算完成
         except Exception as e:
             raise Exception(f"VASP计算执行失败: {str(e)}")
     
-    def _create_slurm_job(self,num_nodes=2, total_tasks=56, tasks_per_node=28, partition="normal3", cmd="srun /path/to/vasp_std"):
+    def _create_slurm_job(self,num_nodes=2, total_tasks=80, tasks_per_node=40, partition="normal3", cmd="srun /path/to/vasp_std"):
         script = f"""#!/bin/bash
         #SBATCH -N {num_nodes}
         #SBATCH -n {total_tasks}
@@ -1502,47 +1517,47 @@ echo "VASP计算完成
         """分析计算结果"""
         try:
             # 检查收敛性
-            print(f"分析计算结果: {work_dir}")
+            logger.info(f"🔍 分析计算结果: {work_dir}")
             outcar_path = work_dir / "OUTCAR"
             convergence = self._check_convergence(outcar_path)
-            print("收敛性: ", convergence)
+            logger.info(f"📊 收敛性: {convergence}")
 
             # 提取能量
-            print("提取能量: ", outcar_path)
+            logger.debug(f"提取能量: {outcar_path}")
             energy = self._extract_energy(outcar_path)
-            print("能量: ", energy)
+            logger.info(f"⚡ 能量: {energy} eV")
+
             # 提取力
-            print("提取力: ", outcar_path)
+            logger.debug(f"提取力: {outcar_path}")
             forces = self._extract_forces(outcar_path)
-            print("力: ", forces)
+            logger.debug(f"💪 力: {forces}")
+
             # 复制优化后的结构
-            print("复制优化后的结构: ", work_dir)
+            logger.debug(f"复制优化后的结构: {work_dir}")
             contcar_path = work_dir / "CONTCAR"
-            print("CONTCAR: ", contcar_path)
             optimized_structure = None
             if contcar_path.exists():
                 optimized_structure = str(contcar_path)
-                print("优化后的结构: ", optimized_structure)
+                logger.info(f"📄 优化后的结构: {optimized_structure}")
 
             # 生成可视化分析报告（仅对结构优化任务）
-            print("生成可视化分析报告: ", work_dir)
+            logger.info(f"📊 生成可视化分析报告: {work_dir}")
             html_report_path = None
             analysis_data = None
             try:
                 from .optimization_analyzer import generate_optimization_report, OUTCARAnalyzer
                 if outcar_path.exists():
                     # 生成分析数据
-                    print("生成分析数据: ", work_dir)
+                    logger.debug(f"生成分析数据: {work_dir}")
                     analyzer = OUTCARAnalyzer(str(work_dir), task_id="optimization")
                     analysis_data = analyzer.analyze()
-                    print("分析数据: ", analysis_data)
+                    logger.debug(f"分析数据长度: {len(str(analysis_data))} 字符")
                     # 生成HTML报告
-                    print("生成HTML报告: ", work_dir)
+                    logger.debug(f"生成HTML报告: {work_dir}")
                     html_report_path = generate_optimization_report(str(work_dir), "optimization")
-                    print("HTML报告: ", html_report_path)
-                    print(f"📊 结构优化分析报告已生成: {html_report_path}")
+                    logger.info(f"📊 结构优化分析报告已生成: {html_report_path}")
             except Exception as e:
-                print(f"⚠️ 生成可视化分析报告失败: {e}")
+                logger.warning(f"⚠️ 生成可视化分析报告失败: {e}")
 
             # 安全地生成下载URL（处理路径不在DOWNLOAD_URL下的情况）
             optimized_structure_url = None
@@ -1585,7 +1600,7 @@ echo "VASP计算完成
             if analysis_data and 'convergence_analysis' in analysis_data:
                 # 使用详细分析数据
                 conv_analysis = analysis_data['convergence_analysis']
-                print("简化结果: ", conv_analysis)
+                logger.info(f"📦 简化结果收敛分析: 力收敛={conv_analysis.get('force_convergence', {}).get('converged', False)}, 能量收敛={conv_analysis.get('energy_convergence', {}).get('converged', False)}")
                 simplified_result = {
                     'success': result['success'],
                     'force_convergence': conv_analysis.get('force_convergence', {}).get("converged", False),
@@ -1665,22 +1680,39 @@ echo "VASP计算完成
 
     def _run_bader_analysis(self, work_dir: Path):
         """运行Bader电荷分析"""
-        CHGSUM_PL_PATH = get_path_config()["vasp_path"]["chgsum_pl"]
-        BADER_PATH = get_path_config()["vasp_path"]["bader"]
+        print("--------------------------------")
+        print("运行Bader电荷分析")
+        print("--------------------------------")
+        CHGSUM_PL_PATH = get_path_config()["CHGSUM_PL_PATH"]
+        BADER_PATH = get_path_config()["BADER_PATH"]
+        print("--------------------------------")
+        print("CHGSUM_PL_PATH: ", CHGSUM_PL_PATH)
+        print("--------------------------------")
+        print("BADER_PATH: ", BADER_PATH)
+        print("--------------------------------")
         for f in ["AECCAR0", "AECCAR2", "CHGCAR"]:
             if not os.path.exists(os.path.join(work_dir, f)): 
+                print("--------------------------------")
+                print("未找到Bader分析所需文件: ", f)
+                print("--------------------------------")
                 raise Exception("  - 错误: 未找到Bader分析所需文件 {}。".format(f))
         chgsum_cmd = ["perl", CHGSUM_PL_PATH, "AECCAR0", "AECCAR2"]
+        print("--------------------------------")
+        print("chgsum_cmd: ", chgsum_cmd)
+        print("--------------------------------")
         result = subprocess.run(
-            chgsum_cmd, cwd=work_dir, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT, text=True, check=True
+            chgsum_cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True
         )
+        print("--------------------------------")
+        print("result: ", result)
+        print("--------------------------------")
         if result.returncode != 0:
             raise Exception("  - 错误: 生成 CHGCAR_sum 文件失败。")
         if not os.path.exists(os.path.join(work_dir, "CHGCAR_sum")): 
             raise Exception("  - 错误: 未生成 CHGCAR_sum 文件。")
         bader_cmd = [BADER_PATH, "CHGCAR", "-ref", "CHGCAR_sum"]
         result = subprocess.run(
-            bader_cmd, cwd=work_dir, stdout=subprocess.STDOUT, stderr=subprocess.STDOUT, text=True, check=True
+            bader_cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True
         )
         if result.returncode != 0:
             raise Exception("  - 错误: Bader分析失败。")
@@ -1690,23 +1722,46 @@ echo "VASP计算完成
         """分析自洽场计算结果"""
         try:
             # 检查收敛性
+            print("--------------------------------")
+            print("检查收敛性")
+            print("--------------------------------")
             outcar_path = work_dir / "OUTCAR"
             convergence = self._check_convergence(outcar_path)
-            
+            print("--------------------------------")
+            print("收敛性: ", convergence)
+            print("--------------------------------")
             # 提取总能量
             total_energy = self._extract_energy(outcar_path)
-            
+            print("--------------------------------")
+            print("总能量: ", total_energy)
+            print("--------------------------------")
             # 提取费米能级
             fermi_energy = self._extract_fermi_energy(outcar_path)
-            
+            print("--------------------------------")
+            print("费米能级: ", fermi_energy)
+            print("--------------------------------")
             # 提取带隙
             band_gap = self._extract_band_gap(outcar_path)
-            
+            print("--------------------------------")
+            print("带隙: ", band_gap)
+            print("--------------------------------")
             # 提取电子步数
             electronic_steps = self._extract_electronic_steps(outcar_path)
+            print("--------------------------------")
+            print("电子步数: ", electronic_steps)
+            print("--------------------------------")
             # 运行Bader电荷分析
+            print("--------------------------------")
+            print("运行Bader电荷分析")
+            print("--------------------------------")
             self._run_bader_analysis(work_dir)
+            print("--------------------------------")
+            print("Bader电荷分析完成")
+            print("--------------------------------")
             # 生成可视化分析报告（使用新的SCF分析器）
+            print("--------------------------------")
+            print("生成可视化分析报告")
+            print("--------------------------------")
             html_report_path = None
             analysis_data = None
             try:
@@ -1748,7 +1803,21 @@ echo "VASP计算完成
             if analysis_data:
                 result['analysis_data'] = analysis_data
             
-            return result
+            # 简化返回结果
+            simplified_result = {
+                'success': result['success'],
+                'convergence': result['convergence'],
+                'total_energy': result['total_energy'],
+                'fermi_energy': result['fermi_energy'],
+                'band_gap': result['band_gap'],
+                'electronic_steps': result['electronic_steps'],
+                'scf_structure': get_download_url(result['scf_structure']),
+                'scf_analysis_report_html_path': result.get('scf_analysis_report_html_path', None),
+                'calculation_settings': result.get('analysis_data', {}).get('calculation_settings', None),
+                'Note': "More analysis results such as Bader charge analysis, etc. are available in the analysis html report.",
+            }
+
+            return simplified_result
             
         except Exception as e:
             return {
@@ -1837,19 +1906,18 @@ echo "VASP计算完成
             if doscar_exists:
                 dos_data = self._extract_dos_data(doscar_path)
                 kpoints_used = self._extract_kpoints_info(work_dir / "KPOINTS")
-            
-            # 生成可视化分析报告（使用SCF分析器，因为DOS计算也包含SCF过程）
+
+            # 生成可视化分析报告（使用DOS分析器）
             html_report_path = None
             analysis_data = None
             try:
-                from .scf_analyzer import generate_scf_report, SCFAnalyzer
+                from .dos_analyzer import generate_pymatgen_dos_report, PyMatGenDOSAnalyzer
                 if outcar_path.exists():
                     # 生成分析数据
-                    analyzer = SCFAnalyzer(str(work_dir), task_id="dos")
+                    analyzer = PyMatGenDOSAnalyzer(str(work_dir), task_id="dos")
                     analysis_data = analyzer.analyze()
-                    
                     # 生成HTML报告
-                    html_report_path = generate_scf_report(str(work_dir), "dos")
+                    html_report_path = generate_pymatgen_dos_report(str(work_dir), task_id="dos")
                     print(f"📊 DOS计算分析报告已生成: {html_report_path}")
             except Exception as e:
                 print(f"⚠️ 生成DOS可视化分析报告失败: {e}")
@@ -1879,10 +1947,23 @@ echo "VASP计算完成
                 result['analysis_report_html_path'] = html_relative_path
             
             # 如果生成了分析数据，添加到结果中
-            if analysis_data:
-                result['analysis_data'] = analysis_data
-            
-            return result
+            if analysis_data is not None:
+                analysis_data.pop('visualizations', None)
+                
+                analysis_data.pop('task_info', None)
+
+            simplified_result = {
+                'success': result['success'],
+                'convergence': result['convergence'],
+                'total_energy': result['total_energy'],
+                'fermi_energy': result['fermi_energy'],
+                'band_gap': result['band_gap'],
+                'dos_structure': get_download_url(result['dos_structure']),
+                'dos_analysis_report_html_path': result.get('analysis_report_html_path', None),
+                "analysis_data": analysis_data,
+                'Note': "More analysis results and visualization are available in the analysis html report.",
+            }
+            return simplified_result
             
         except Exception as e:
             return {
