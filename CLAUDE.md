@@ -4,80 +4,92 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture Overview
 
-This is a VASP (Vienna Ab initio Simulation Package) calculation service with a dual architecture:
+This is a VASP (Vienna Ab initio Simulation Package) computational chemistry service with two independently deployable layers:
 
-1. **VASP Server API** (`src/vasp_server/`) - FastAPI backend that manages VASP computational tasks
-2. **MCP Integration** (`src/mcp_ic_tool/`) - Model Context Protocol server for LLM agent integration
+**Layer 1 – VASP Server** (`src/vasp_server/`): A FastAPI backend that orchestrates VASP calculations. It accepts HTTP requests, manages a task queue backed by a PostgreSQL cloud database (Aliyun RDS), and spawns each calculation in its own daemon thread with a new asyncio event loop.
 
-### Key Components
+**Layer 2 – MCP Integration** (`src/mcp_ic_tool/`): A FastMCP server that exposes VASP workflows as LLM-callable tools. It is a thin HTTP client over Layer 1 — the MCP tools translate agent requests into REST calls to the VASP Server API.
 
-- **Task Management**: Centralized task queue system with SQLite database (`tasks.db`)
-- **Analysis Modules**: Specialized analyzers for DOS, band gap, MD, SCF, and structure optimization
-- **Configuration**: Centralized VASP parameter templates and paths (`src/vasp_server/Config.py`)
+### Data Flow
+
+```
+LLM Agent → MCP Server (port 8130, /mcp) → VASP Server API (port 8140) → VaspWorker thread → VASP binary on HPC
+```
+
+The MCP server and VASP server can run on different machines. `src/mcp_ic_tool/config.py` holds `VASP_SERVER_BASE_URL` pointing to the remote VASP API endpoint.
+
+### Task Lifecycle
+
+1. API endpoint receives request → `TaskManager.submit_task()` writes a `Task` row to PostgreSQL with status `queued`
+2. A daemon thread starts immediately, running `VaspWorker` methods via a fresh `asyncio.new_event_loop()`
+3. `VaspWorker` fetches a CIF file (from Materials Project API or URL), converts it to POSCAR via `cif_to_poscar()` (`base.py`), generates VASP input files, and runs the VASP binary as a subprocess
+4. Progress callbacks update the `Task.progress` and `Task.error_message` fields in real time
+5. On completion, `Task.result_data` stores the full result dict (including HTML analysis report paths)
+
+### Calculation Types & Analyzers
+
+Each task type has a dedicated analyzer module:
+- `optimization_analyzer.py` – structure relaxation
+- `scf_analyzer.py` – self-consistent field
+- `dos_analyzer.py` – density of states
+- `md_analyzer.py` – molecular dynamics (supports multi-temperature scan via `T_*K/` subdirectories)
+- `bandgap_analyzer.py` – band gap extraction
+
+`calc_type` parameter maps to INCAR templates defined in `Config.py`: `OXC` (oxide/sulfide), `ORC` (oxide reduction catalyst + vdW correction), `SSE`/`ECAT_OER`/`ECAT_HER` use OXC template. MD has its own separate template.
+
+### Key Configuration
+
+All server-side paths and INCAR templates are in `src/vasp_server/Config.py`:
+- VASP binary: `/data/app/vasp/6.3.2-intel/bin/vasp_std`
+- Pseudopotentials: `/data/home/ysl9527/software/psudopotential`
+- Calculation output root: `/data/home/ysl9527/vasp_calculations/{user_id}/{task_id}/`
+
+MCP client endpoint config is in `src/mcp_ic_tool/config.py` (`VASP_SERVER_BASE_URL`).
+
+Database credentials are hardcoded in `src/vasp_server/task_manager/database.py` — override with env vars `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
 
 ## Running the Services
 
-### VASP Server API
+### MCP Server (primary entry point for LLM agents)
 ```bash
-# Run the main VASP computation server
-python -m uvicorn src.vasp_server.vasp_server_api:app --host 0.0.0.0 --port 8000
-
-# Single port development server
-python single_port_server.py
+# Single-port server: MCP at /mcp + file download service
+python single_port_server.py                     # default port 8130
+python single_port_server.py --port 9000 --host 0.0.0.0
 ```
 
-### MCP Server
+### VASP Server API (backend computation server, typically on HPC)
 ```bash
-# The MCP server provides LLM agent integration
-python -m src.mcp_ic_tool.mcp_server
+python -m uvicorn src.vasp_server.vasp_server_api:app --host 0.0.0.0 --port 8140
 ```
 
-## Development Commands
-
-### Dependencies
+### Install Dependencies
 ```bash
-# Install Python dependencies
 pip install -r requirements.txt
 ```
 
-### Database Management
+### Database Utilities
 ```bash
-# Inspect the task database
-python inspect_tasks_db.py
-
-# Debug VASP API calls
-python debug_vasp_api.py
+python inspect_tasks_db.py      # inspect task records
+python debug_vasp_api.py        # debug API calls
 ```
 
-## Project Structure
+## MCP Tools Exposed to Agents
 
-- `src/vasp_server/` - Core VASP computational backend
-  - `vasp_server_api.py` - Main FastAPI application
-  - `task_manager/` - Task queue and database management
-  - `*_analyzer.py` - Specialized computation modules (DOS, MD, SCF, etc.)
-  - `Config.py` - VASP parameter templates and system paths
-  - `schemas.py` - Pydantic models for API requests/responses
+- `submit_structure_optimization` – structure relaxation (requires `formula` XOR `cif_url`)
+- `submit_scf_calculation` – SCF (requires one of `formula`/`cif_url`/`optimized_task_id`)
+- `submit_dos_calculation` – DOS (requires one of `formula`/`cif_url`/`scf_task_id`)
+- `submit_md_calculation` – MD with optional multi-temperature list (requires one of `formula`/`cif_url`/`scf_task_id`)
+- `get_task_status` / `cancel_task` / `list_user_tasks` – task management
+- `get_custom_incar_help` – returns INCAR parameter guide
 
-- `src/mcp_ic_tool/` - MCP integration layer
-  - `mcp_server.py` - MCP server implementation
-  - `client.py` - HTTP client for VASP API calls
-  - `models.py` - Input validation models
+`user_id` is read from the HTTP request header `user_id` by `get_user_id(ctx)` and defaults to `"123"` if absent.
 
-- Test directories (`dos_test/`, `scf_test/`, `md_test/`) - Contain calculation examples and test cases
+## Adding a New Calculation Type
 
-## Key Configuration
-
-The system uses hardcoded paths for VASP binaries and pseudopotentials defined in `src/vasp_server/Config.py`:
-- VASP executable: `/data/app/vasp/6.3.2-intel/bin/vasp_std`
-- Pseudopotential path: `/data/home/ysl9527/software/psudopotential`
-
-INCAR templates are provided for different calculation types (OXC, ORC, MD) with sensible defaults that can be customized via the `custom_incar` parameter in API requests.
-
-## Task Types Supported
-
-1. **Structure Optimization** - Geometric optimization with VASP
-2. **SCF Calculations** - Self-consistent field calculations
-3. **DOS Calculations** - Density of states analysis
-4. **MD Simulations** - Molecular dynamics simulations
-
-Each calculation type has its own analyzer module and predefined INCAR templates.
+1. Create `src/vasp_server/{name}_analyzer.py` with analysis logic
+2. Add INCAR template in `Config.py` → `base_incars` dict
+3. Add Pydantic request/response schemas in `schemas.py`
+4. Add API endpoint in `vasp_server_api.py`
+5. Add `VaspWorker.run_{name}_calculation()` method in `vasp_worker.py`
+6. Add the task type branch in `task_manager/manager.py → _run_task_worker()`
+7. Add MCP tool in `mcp_server.py` and input model in `models.py`
