@@ -55,5 +55,18 @@ class VaspAPIClient:
         """Get task result - same as get_task_status (both use /vasp/task/{task_id} endpoint)"""
         return await self._aget(f"/vasp/task/{task_id}", {"user_id": user_id})
 
+    # --- 独立分析 ---
+    async def analyze_optimization(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._apost("/vasp/analyze/optimization", payload)
+
+    async def analyze_scf(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._apost("/vasp/analyze/scf", payload)
+
+    async def analyze_dos(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._apost("/vasp/analyze/dos", payload)
+
+    async def analyze_md(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._apost("/vasp/analyze/md", payload)
+
 
 

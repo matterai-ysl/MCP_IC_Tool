@@ -18,13 +18,23 @@ LLM Agent → MCP Server (port 8130, /mcp) → VASP Server API (port 8140) → V
 
 The MCP server and VASP server can run on different machines. `src/mcp_ic_tool/config.py` holds `VASP_SERVER_BASE_URL` pointing to the remote VASP API endpoint.
 
-### Task Lifecycle
+### Task Lifecycle (v2-lite)
 
-1. API endpoint receives request → `TaskManager.submit_task()` writes a `Task` row to PostgreSQL with status `queued`
-2. A daemon thread starts immediately, running `VaspWorker` methods via a fresh `asyncio.new_event_loop()`
-3. `VaspWorker` fetches a CIF file (from Materials Project API or URL), converts it to POSCAR via `cif_to_poscar()` (`base.py`), generates VASP input files, and runs the VASP binary as a subprocess
-4. Progress callbacks update the `Task.progress` and `Task.error_message` fields in real time
-5. On completion, `Task.result_data` stores the full result dict (including HTML analysis report paths)
+1. API endpoint receives request → `TaskManager.submit_task()` writes a `Task` row (status=`queued`, analysis_status=`pending`)
+2. A daemon thread starts immediately → creates `ExecutionAttempt` record → runs `VaspWorker` via fresh `asyncio.new_event_loop()`
+3. `VaspWorker` fetches CIF, converts to POSCAR, generates VASP inputs, runs VASP binary via SLURM
+4. Progress callbacks update `Task.progress` and `Task.progress_message` (NOT `error_message`)
+5. On execution success → `ExecutionAttempt.status=succeeded` → auto-triggers `AnalysisRun`
+6. Analysis extracts summary → registers `Artifact` records → writes `Task.result_summary` + `html_report_url`
+7. Final state: `Task.status=completed`, `Task.analysis_status=completed`
+8. If analysis fails: `Task.status=completed`, `Task.analysis_status=failed` — execution record preserved
+
+### Internal Data Model (v2-lite)
+
+- **Task** — primary object, backward-compatible. New fields: `analysis_status`, `result_summary`, `progress_message`, `input_snapshot`
+- **ExecutionAttempt** — records each VASP run attempt (status: submitting→submitted→running→succeeded/runtime_failed/canceled)
+- **AnalysisRun** — independent analysis phase (status: pending→running→completed/failed). Contains `summary` JSON
+- **Artifact** — indexes all file outputs (OUTCAR, CONTCAR, HTML reports, etc.) with `storage_backend=local` and `storage_key`
 
 ### Calculation Types & Analyzers
 
@@ -91,5 +101,15 @@ python debug_vasp_api.py        # debug API calls
 3. Add Pydantic request/response schemas in `schemas.py`
 4. Add API endpoint in `vasp_server_api.py`
 5. Add `VaspWorker.run_{name}_calculation()` method in `vasp_worker.py`
-6. Add the task type branch in `task_manager/manager.py → _run_task_worker()`
+6. Register in `manager.py` → `TASK_TYPE_TO_METHOD` and `TASK_TYPE_TO_ANALYSIS` dicts (no more if/elif chains)
 7. Add MCP tool in `mcp_server.py` and input model in `models.py`
+
+## Running Tests
+
+```bash
+uv venv .venv --python 3.12
+uv pip install pytest pytest-asyncio sqlalchemy pydantic fastapi httpx
+.venv/bin/python -m pytest tests/ -v
+```
+
+Tests use in-memory SQLite and mock VaspWorker — no PostgreSQL or VASP binary needed.

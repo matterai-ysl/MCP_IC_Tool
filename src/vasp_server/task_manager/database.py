@@ -38,8 +38,10 @@ def check_and_init_db() -> None:
         inspector = inspect(engine)
         tables = inspector.get_table_names()
 
-        if 'tasks' not in tables:
-            print("⚠️  数据库表不存在，开始自动初始化...")
+        required_tables = {'tasks', 'execution_attempts', 'analysis_runs', 'artifacts'}
+        missing = required_tables - set(tables)
+        if missing:
+            print(f"⚠️  缺少数据库表 {missing}，开始自动初始化...")
             init_db()
         else:
             print("✅ 数据库表已存在")

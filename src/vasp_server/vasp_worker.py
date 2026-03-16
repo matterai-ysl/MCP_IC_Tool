@@ -295,7 +295,11 @@ class VaspWorker:
         if progress_callback:
             await progress_callback(90, "分析分子动力学计算结果...")
         final_result = await self._analyze_md_results(work_dir, result)
-        
+
+        # 确保 success 字段存在 — 修复 MD 成功判定 bug
+        if 'success' not in final_result:
+            final_result['success'] = final_result.get('convergence', False)
+
         # 5. 生成MD分析HTML报告
         try:
             md_report_func = _load_md_report_func()
@@ -311,11 +315,14 @@ class VaspWorker:
         except Exception as e:
             print(f"⚠️ 生成MD分析报告失败: {e}")
         
+        # 确保 work_directory 存在
+        final_result['work_directory'] = str(work_dir)
+
         if progress_callback:
             await progress_callback(100, "分子动力学计算完成！")
-            
+
         return final_result
-    
+
     async def _run_multi_temperature_md(self, task_id: str, params: Dict[str, Any], temperatures: List[float], progress_callback=None) -> Dict[str, Any]:
         """运行多温度MD计算"""
         work_dir = self.base_work_dir / task_id
@@ -414,6 +421,7 @@ class VaspWorker:
         
         # 构建最终结果
         final_result = {
+            "success": completed_count > 0,  # 至少一个温度成功
             "is_multi_temperature": True,
             "total_subtasks": total_temps,
             "completed_subtasks": completed_count,
@@ -421,6 +429,7 @@ class VaspWorker:
             "subtask_results": subtask_results,
             "md_analysis_report_html_path": html_relative_path,
             "md_output_dir": str(work_dir / "MD_output"),
+            "work_directory": str(work_dir),
             "convergence": completed_count > 0,
             "computation_time": sum([r.get("computation_time", 0) for r in subtask_results if r.get("computation_time")])
         }

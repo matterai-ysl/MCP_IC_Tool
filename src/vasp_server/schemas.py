@@ -54,10 +54,28 @@ class TaskStatus(str, Enum):
     """任务状态"""
     queued = "queued"
     running = "running"
+    analyzing = "analyzing"
     completed = "completed"
     failed = "failed"
     canceled = "canceled"
     canceling = "canceling"
+    cancel_requested = "cancel_requested"
+
+
+class AnalysisStatus(str, Enum):
+    """分析状态"""
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class ArtifactInfo(BaseModel):
+    """Artifact 摘要 (对外返回)"""
+    id: str
+    artifact_type: str
+    mime_type: Optional[str] = None
+    size_bytes: Optional[float] = None
 
 class StructOptResponse(BaseModel):
     """结构优化响应模型"""
@@ -66,12 +84,21 @@ class StructOptResponse(BaseModel):
     message: str = Field(..., description="响应消息")
 
 class TaskStatusResponse(BaseModel):
-    """任务状态查询响应模型"""
+    """任务状态查询响应模型 — v2-lite 增强版，保持向后兼容"""
     task_id: str
     user_id: str
     task_type: str
     status: TaskStatus
     progress: int = Field(..., description="进度百分比 (0-100)")
+
+    # --- v2-lite 新增字段 ---
+    analysis_status: Optional[AnalysisStatus] = Field(None, description="分析状态")
+    result_summary: Optional[dict] = Field(None, description="结构化结果摘要")
+    html_report_url: Optional[str] = Field(None, description="HTML分析报告URL")
+    artifacts: Optional[List[ArtifactInfo]] = Field(None, description="产物列表")
+    progress_message: Optional[str] = Field(None, description="进度消息")
+
+    # --- 兼容旧字段 ---
     params: Optional[dict] = None
     result_path: Optional[str] = None
     external_job_id: Optional[str] = None
@@ -281,4 +308,29 @@ class MDResult(BaseModel):
     total_md_steps: Optional[int] = Field(None, description="完成的MD步数")
     convergence: bool = Field(False, description="是否正常完成")
     computation_time: Optional[float] = Field(None, description="计算耗时 (秒)")
-    trajectory_data: Optional[dict] = Field(None, description="轨迹统计数据") 
+    trajectory_data: Optional[dict] = Field(None, description="轨迹统计数据")
+
+
+# ====================================================================== #
+#  独立分析请求/响应模型
+# ====================================================================== #
+
+class AnalyzeRequest(BaseModel):
+    """独立分析请求模型 — 支持 task_id 或 file_url 二选一"""
+    user_id: Optional[str] = Field(None, description="用户ID")
+    task_id: Optional[str] = Field(None, description="已有任务ID，直接分析其结果目录")
+    file_url: Optional[HttpUrl] = Field(None, description="VASP输出文件压缩包URL（zip/tar.gz），包含OUTCAR等文件")
+
+    def model_post_init(self, __context) -> None:
+        input_count = sum([bool(self.task_id), bool(self.file_url)])
+        if input_count != 1:
+            raise ValueError("必须提供 task_id 或 file_url 中的一个")
+
+
+class AnalyzeResponse(BaseModel):
+    """独立分析响应模型"""
+    success: bool = Field(..., description="分析是否成功")
+    analysis_type: str = Field(..., description="分析类型")
+    summary: Optional[dict] = Field(None, description="结构化分析摘要")
+    html_report_url: Optional[str] = Field(None, description="HTML分析报告URL")
+    error_message: Optional[str] = Field(None, description="错误信息")

@@ -10,8 +10,10 @@ from pathlib import Path
 # Config import moved to __main__ block
 from .schemas import (
     StructOptRequest, StructOptResponse, TaskStatusResponse,
-    TaskStatus, SCFRequest, SCFResponse,
-    DOSRequest, DOSResponse, MDRequest, MDResponse
+    TaskStatus, AnalysisStatus, ArtifactInfo,
+    SCFRequest, SCFResponse,
+    DOSRequest, DOSResponse, MDRequest, MDResponse,
+    AnalyzeRequest, AnalyzeResponse,
 )
 from .task_manager.manager import TaskManager
 from .task_manager.database import check_and_init_db
@@ -404,93 +406,101 @@ async def submit_md_calculation(request: MDRequest):
  
 @app.get("/vasp/task/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str, user_id: str = Query(..., description="用户ID")):
-    """
-    查询任务状态与任务结果
-    
-    Args:
-        task_id: 任务ID
-        user_id: 用户ID
-        
-    Returns:
-        TaskStatusResponse: 任务状态信息
-    """
+    """查询任务状态与任务结果"""
     try:
         task = task_manager.get_task(task_id, user_id)
-        logger.debug(f"Task object: {task}")
-        # 打印 task 对象的所有属性和值（调试用）
-        logger.debug("\n" + "="*60)
-        logger.debug("🔍 DEBUG: task 对象完整属性清单")
-        logger.debug("="*60)
-        for attr in dir(task):
-            if not attr.startswith('_'):  # 跳过私有属性
-                try:
-                    value = getattr(task, attr)
-                    logger.debug(f"{attr}: {repr(value)} (类型: {type(value).__name__})")
-                except Exception as e:
-                    logger.debug(f"{attr}: ❌ 获取失败 - {e}")
-        logger.debug("="*60 + "\n")
         if not task:
             raise HTTPException(status_code=404, detail="任务未找到或无权限访问")
-        
-        # 构建基本响应
-        # 构建基本响应 - 安全访问，避免崩溃
-        response_data = {
-            "task_id": getattr(task, 'id', None),
-            "user_id": getattr(task, 'user_id', None),
-            "task_type": getattr(task, 'task_type', None),
-            "status": None,  # 默认值
-            "progress": getattr(task, 'progress', 0) or 0,  # 避免 None
-            "params": getattr(task, 'params', None),
-            "result_path": getattr(task, 'result_path', None),
-            "external_job_id": getattr(task, 'external_job_id', None),
-            "process_id": getattr(task, 'process_id', None),
-            "error_message": getattr(task, 'error_message', None),
-            "result_data": getattr(task, 'result_data', None),
-            "created_at": getattr(task, 'created_at', None),
-            "updated_at": getattr(task, 'updated_at', None),
-        }
-        
-        # 处理时间字段 - 转换为字符串
-        if response_data["created_at"]:
-            response_data["created_at"] = response_data["created_at"].isoformat()
-        else:
-            response_data["created_at"] = ""
-            
-        if response_data["updated_at"]:
-            response_data["updated_at"] = response_data["updated_at"].isoformat()
-        else:
-            response_data["updated_at"] = ""
 
-        # 安全设置 status（单独处理，避免枚举转换崩溃）
-        try:
-            status_val = getattr(task, 'status', None)
-            if status_val:
-                response_data["status"] = TaskStatus(status_val)
-            else:
-                response_data["status"] = TaskStatus.queued
-        except (ValueError, AttributeError):
-            # 如果状态值非法，设置默认状态
-            response_data["status"] = TaskStatus.queued
-
-        logger.debug("🔧 response_data内容:")
-        for key, value in response_data.items():
-            logger.debug(f"  {key}: {repr(value)} (类型: {type(value).__name__})")
-
-        try:
-            result = TaskStatusResponse(**response_data)
-            logger.debug("✅ TaskStatusResponse创建成功")
-            return result
-        except Exception as validation_error:
-            logger.error(f"❌ TaskStatusResponse创建失败: {validation_error}")
-            logger.error(f"❌ 错误类型: {type(validation_error).__name__}")
-            raise HTTPException(status_code=500, detail=f"响应模型验证失败: {str(validation_error)}")
+        return _build_task_response(task, task_id)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 其他异常: {e}")
-        logger.error(f"❌ 异常类型: {type(e).__name__}")
+        logger.error(f"查询任务状态失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"查询任务状态失败: {str(e)}")
+
+
+def _safe_task_status(status_val) -> TaskStatus:
+    """安全转换任务状态"""
+    try:
+        return TaskStatus(status_val) if status_val else TaskStatus.queued
+    except (ValueError, AttributeError):
+        return TaskStatus.queued
+
+
+def _safe_analysis_status(status_val) -> AnalysisStatus | None:
+    """安全转换分析状态"""
+    try:
+        return AnalysisStatus(status_val) if status_val else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def _build_task_response(task, task_id: str) -> TaskStatusResponse:
+    """从 Task ORM 构建统一的 TaskStatusResponse"""
+    # 从 result_summary 提取 html_report_url
+    result_summary = getattr(task, 'result_summary', None)
+    html_report_url = None
+    if isinstance(result_summary, dict):
+        html_report_url = result_summary.get('html_report_url')
+
+    # 如果 result_summary 没有 html_report_url，从 result_data 兜底
+    if not html_report_url:
+        result_data = getattr(task, 'result_data', None)
+        if isinstance(result_data, dict):
+            for key in ['analysis_report_html_path', 'html_analysis_report',
+                        'md_analysis_report_html_path', 'dos_analysis_report_html_path',
+                        'scf_analysis_report_html_path']:
+                val = result_data.get(key)
+                if val:
+                    html_report_url = str(val)
+                    break
+
+    # 查询 artifacts
+    artifacts_list = None
+    try:
+        raw_artifacts = task_manager.get_task_artifacts(task_id)
+        if raw_artifacts:
+            artifacts_list = [
+                ArtifactInfo(
+                    id=str(a.id),
+                    artifact_type=str(a.artifact_type),
+                    mime_type=getattr(a, 'mime_type', None),
+                    size_bytes=getattr(a, 'size_bytes', None),
+                )
+                for a in raw_artifacts
+            ]
+    except Exception:
+        pass  # artifact 查询失败不影响主响应
+
+    response_data = {
+        "task_id": getattr(task, 'id', None),
+        "user_id": getattr(task, 'user_id', None),
+        "task_type": getattr(task, 'task_type', None),
+        "status": _safe_task_status(getattr(task, 'status', None)),
+        "progress": getattr(task, 'progress', 0) or 0,
+        "analysis_status": _safe_analysis_status(getattr(task, 'analysis_status', None)),
+        "result_summary": result_summary,
+        "html_report_url": html_report_url,
+        "artifacts": artifacts_list,
+        "progress_message": getattr(task, 'progress_message', None),
+        "params": getattr(task, 'params', None),
+        "result_path": getattr(task, 'result_path', None),
+        "external_job_id": getattr(task, 'external_job_id', None),
+        "process_id": getattr(task, 'process_id', None),
+        "error_message": getattr(task, 'error_message', None),
+        "result_data": getattr(task, 'result_data', None),
+        "created_at": getattr(task, 'created_at', None),
+        "updated_at": getattr(task, 'updated_at', None),
+    }
+
+    # 时间字段转字符串
+    for tf in ("created_at", "updated_at"):
+        val = response_data[tf]
+        response_data[tf] = val.isoformat() if val else ""
+
+    return TaskStatusResponse(**response_data)
 
 
 @app.post("/vasp/task/{task_id}/cancel")
@@ -521,37 +531,10 @@ async def cancel_task(task_id: str, user_id: str = Query(..., description="用�
 
 @app.get("/vasp/tasks", response_model=List[TaskStatusResponse])
 async def list_user_tasks(user_id: str = Query(..., description="用户ID")):
-    """
-    列出用户的所有任务
-    
-    Args:
-        user_id: 用户ID
-        
-    Returns:
-        List[TaskStatusResponse]: 任务列表
-    """
+    """列出用户的所有任务"""
     try:
         tasks = task_manager.list_tasks(user_id)
-        
-        return [
-            TaskStatusResponse(
-                task_id=task.id,  # type: ignore
-                user_id=task.user_id,  # type: ignore
-                task_type=task.task_type,  # type: ignore
-                status=TaskStatus(task.status),  # type: ignore
-                progress=task.progress,  # type: ignore
-                params=task.params,  # type: ignore
-                result_path=task.result_path,  # type: ignore
-                external_job_id=task.external_job_id,  # type: ignore
-                process_id=task.process_id,  # type: ignore
-                error_message=task.error_message,  # type: ignore
-                result_data=task.result_data,  # type: ignore
-                created_at=task.created_at.isoformat() if task.created_at else "",  # type: ignore
-                updated_at=task.updated_at.isoformat() if task.updated_at else ""  # type: ignore
-            )
-            for task in tasks
-        ]
-        
+        return [_build_task_response(task, str(task.id)) for task in tasks]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取任务列表失败: {str(e)}")
 
@@ -767,6 +750,177 @@ async def download_file(file_path: str):
 #     except Exception as e:
 #         result["error_message"] = str(e)
 #         return result
+
+
+# ====================================================================== #
+#  独立分析端点 — 支持 task_id 或 file_url
+# ====================================================================== #
+
+import tempfile, zipfile, tarfile, shutil, requests as _requests
+
+
+def _resolve_analysis_input_dir(req: AnalyzeRequest) -> str:
+    """根据 task_id 或 file_url 解析出包含 VASP 输出文件的目录路径。"""
+    if req.task_id:
+        user_id = req.user_id or "123"
+        task = task_manager.get_task(req.task_id, user_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"任务 {req.task_id} 未找到或无权限访问")
+        work_dir = getattr(task, "result_path", None)
+        if not work_dir:
+            # 从 result_data 尝试获取
+            result_data = getattr(task, "result_data", None) or {}
+            work_dir = result_data.get("work_directory")
+        if not work_dir or not Path(work_dir).exists():
+            raise HTTPException(status_code=400, detail=f"任务 {req.task_id} 的工作目录不存在或任务尚未完成")
+        return str(work_dir)
+
+    # --- file_url: 下载压缩包并解压 ---
+    url = str(req.file_url)
+    tmp_dir = tempfile.mkdtemp(prefix="vasp_analyze_")
+    archive_path = Path(tmp_dir) / "archive"
+    try:
+        resp = _requests.get(url, timeout=120, stream=True)
+        resp.raise_for_status()
+        with open(archive_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"下载文件失败: {e}")
+
+    extract_dir = Path(tmp_dir) / "extracted"
+    extract_dir.mkdir()
+    try:
+        if zipfile.is_zipfile(archive_path):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(extract_dir)
+        elif tarfile.is_tarfile(str(archive_path)):
+            with tarfile.open(str(archive_path), "r:*") as tf:
+                tf.extractall(extract_dir)
+        else:
+            raise HTTPException(status_code=400, detail="文件格式不支持，请上传 zip 或 tar.gz 压缩包")
+    except (zipfile.BadZipFile, tarfile.TarError) as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"解压文件失败: {e}")
+
+    # 如果解压后只有一个子目录，进入该子目录
+    children = list(extract_dir.iterdir())
+    if len(children) == 1 and children[0].is_dir():
+        return str(children[0])
+    return str(extract_dir)
+
+
+def _make_analyze_response(analysis_type: str, summary: dict, html_path: str | None) -> AnalyzeResponse:
+    html_url = None
+    if html_path:
+        from .Config import get_static_url
+        html_url = get_static_url(html_path)
+    return AnalyzeResponse(
+        success=True,
+        analysis_type=analysis_type,
+        summary=summary,
+        html_report_url=html_url,
+    )
+
+
+@app.post("/vasp/analyze/optimization", response_model=AnalyzeResponse)
+async def analyze_structure_optimization(request: AnalyzeRequest):
+    """独立分析结构优化结果 — 传入 task_id 或 file_url"""
+    try:
+        work_dir = _resolve_analysis_input_dir(request)
+        from .analyzers.optimization import OUTCARAnalyzer, generate_optimization_report
+        analyzer = OUTCARAnalyzer(work_dir)
+        data = analyzer.analyze()
+        html_path = generate_optimization_report(work_dir)
+        summary = {
+            "force_convergence": data.get("convergence_analysis", {}).get("force_converged"),
+            "final_max_force": data.get("convergence_analysis", {}).get("final_max_force"),
+            "energy_convergence": data.get("convergence_analysis", {}).get("energy_converged"),
+            "final_energy": data.get("final_results", {}).get("total_energy"),
+        }
+        return _make_analyze_response("optimization", summary, html_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分析结构优化失败: {e}", exc_info=True)
+        return AnalyzeResponse(success=False, analysis_type="optimization", error_message=str(e))
+
+
+@app.post("/vasp/analyze/scf", response_model=AnalyzeResponse)
+async def analyze_scf(request: AnalyzeRequest):
+    """独立分析自洽场计算结果 — 传入 task_id 或 file_url"""
+    try:
+        work_dir = _resolve_analysis_input_dir(request)
+        from .analyzers.scf import SCFAnalyzer, generate_scf_report
+        analyzer = SCFAnalyzer(work_dir)
+        data = analyzer.analyze()
+        html_path = generate_scf_report(work_dir)
+        summary = {
+            "convergence": data.get("electronic_convergence", {}).get("converged"),
+            "total_energy": data.get("final_results", {}).get("total_energy"),
+            "fermi_energy": data.get("electronic_structure", {}).get("fermi_energy"),
+            "band_gap": data.get("electronic_structure", {}).get("band_gap"),
+        }
+        return _make_analyze_response("scf", summary, html_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分析SCF失败: {e}", exc_info=True)
+        return AnalyzeResponse(success=False, analysis_type="scf", error_message=str(e))
+
+
+@app.post("/vasp/analyze/dos", response_model=AnalyzeResponse)
+async def analyze_dos(request: AnalyzeRequest):
+    """独立分析态密度计算结果 — 传入 task_id 或 file_url"""
+    try:
+        work_dir = _resolve_analysis_input_dir(request)
+        from .analyzers.dos import PyMatGenDOSAnalyzer, generate_pymatgen_dos_report
+        analyzer = PyMatGenDOSAnalyzer(work_dir)
+        data = analyzer.analyze()
+        html_path = generate_pymatgen_dos_report(work_dir)
+        summary = {
+            "band_gap": data.get("final_results", {}).get("band_gap"),
+            "fermi_energy": data.get("final_results", {}).get("fermi_energy"),
+            "is_metal": data.get("final_results", {}).get("is_metal"),
+        }
+        return _make_analyze_response("dos", summary, html_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分析DOS失败: {e}", exc_info=True)
+        return AnalyzeResponse(success=False, analysis_type="dos", error_message=str(e))
+
+
+@app.post("/vasp/analyze/md", response_model=AnalyzeResponse)
+async def analyze_md(request: AnalyzeRequest):
+    """独立分析分子动力学计算结果 — 传入 task_id 或 file_url"""
+    try:
+        work_dir = _resolve_analysis_input_dir(request)
+        from .analyzers.md import VASP_MDAnalyzer, generate_md_analysis_report
+        html_path = generate_md_analysis_report(work_dir)
+        analyzer = VASP_MDAnalyzer(work_dir)
+        data = analyzer.analyze()
+        # 检查是否多温度
+        temp_dirs = list(Path(work_dir).glob("T_*K"))
+        if temp_dirs:
+            summary = {
+                "is_multi_temperature": True,
+                "total_subtasks": len(temp_dirs),
+            }
+        else:
+            summary = {
+                "convergence": data.get("final_results", {}).get("convergence"),
+                "final_energy": data.get("final_results", {}).get("final_energy"),
+                "average_temperature": data.get("final_results", {}).get("average_temperature"),
+                "total_md_steps": data.get("final_results", {}).get("total_md_steps"),
+            }
+        return _make_analyze_response("md", summary, html_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分析MD失败: {e}", exc_info=True)
+        return AnalyzeResponse(success=False, analysis_type="md", error_message=str(e))
 
 
 if __name__ == "__main__":
