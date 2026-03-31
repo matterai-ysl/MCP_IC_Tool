@@ -34,10 +34,14 @@ class VaspServerSettings(BaseSettings):
     vasp_remote_run_port: int = 8140
     vasp_public_base_url: str = "https://api.matterai.tech"
     mcp_port: int = 8130
+    internal_worker_token: str = "worker-token"
 
     # ---- Task management ----
     max_concurrent_tasks: int = 4
     default_user_id: str = "123"
+    task_lease_seconds: int = 300
+    worker_poll_interval_seconds: int = 10
+    worker_heartbeat_timeout_seconds: int = 120
 
     # ---- Quota ----
     max_user_concurrent_tasks: int = 3  # 单用户最大并发任务数

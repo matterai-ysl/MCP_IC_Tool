@@ -4,8 +4,7 @@ import os
 import threading
 import uuid
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -116,11 +115,9 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
 
 class TaskManager:
     def __init__(self, max_workers: int = MAX_CONCURRENT_TASKS) -> None:
+        self._max_workers = max_workers
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="vasp-worker"
-        )
 
     # ------------------------------------------------------------------ #
     #  提交任务
@@ -157,7 +154,14 @@ class TaskManager:
                 db.query(sa_func.count(Task.id))
                 .filter(
                     Task.user_id == user_id,
-                    Task.status.in_(["queued", "running", "analyzing"]),
+                    Task.status.in_([
+                        "queued",
+                        "leased",
+                        "running",
+                        "uploading",
+                        "analyzing",
+                        "cancel_requested",
+                    ]),
                 )
                 .scalar()
             ) or 0
@@ -186,29 +190,215 @@ class TaskManager:
                 )
 
             task_id = uuid.uuid4().hex
-            cancel_event = threading.Event()
-            with self._lock:
-                self._cancel_flags[task_id] = cancel_event
 
             task = Task(
                 id=task_id,
                 user_id=user_id,
                 task_type=task_type,
+                tenant_id=str(params.get("tenant_id", "default")),
+                queue_name=str(params.get("queue_name", "default")),
+                priority=int(params.get("priority", 0)),
                 status="queued",
                 analysis_status="pending",
                 progress=0,
                 params=params,
                 input_snapshot=params,
                 input_hash=input_hash,
+                retry_count=0,
+                max_retries=int(params.get("max_retries", MAX_TASK_RETRIES)),
             )
             db.add(task)
             db.commit()
         finally:
             db.close()
 
-        self._executor.submit(self._run_task_worker, task_id, cancel_event)
-
         return task_id
+
+    def _lease_expiration(self, now: datetime) -> datetime:
+        from ..settings import settings as _settings
+
+        return now + timedelta(seconds=_settings.task_lease_seconds)
+
+    def _validate_lease(
+        self,
+        db: Session,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+    ) -> Task:
+        task: Optional[Task] = db.get(Task, task_id)
+        if task is None:
+            raise ValueError(f"任务不存在: {task_id}")
+        if str(task.worker_id) != worker_id or str(task.lease_token) != lease_token:
+            raise ValueError("lease token 或 worker_id 无效")
+        return task
+
+    def claim_next_task(self, worker_id: str, queue_name: str) -> Optional[SimpleNamespace]:
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            query = (
+                db.query(Task)
+                .filter(
+                    Task.status == "queued",
+                    Task.queue_name == queue_name,
+                )
+                .order_by(Task.priority.desc(), Task.created_at.asc())
+            )
+            if db.bind is not None and db.bind.dialect.name == "postgresql":
+                query = query.with_for_update(skip_locked=True)
+
+            task = query.first()
+            if task is None:
+                return None
+
+            task.status = "leased"  # type: ignore
+            task.worker_id = worker_id  # type: ignore
+            task.lease_token = uuid.uuid4().hex  # type: ignore
+            task.lease_expires_at = self._lease_expiration(now)  # type: ignore
+            task.heartbeat_at = now  # type: ignore
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            return _orm_to_ns(task)
+        finally:
+            db.close()
+
+    def heartbeat_task(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            if str(task.status) not in {"leased", "running", "uploading", "analyzing"}:
+                raise ValueError(f"任务状态不允许续租: {task.status}")
+
+            now = datetime.now(timezone.utc)
+            task.heartbeat_at = now  # type: ignore
+            task.lease_expires_at = self._lease_expiration(now)  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def mark_task_running(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            task.status = "running"  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def request_cancel(self, task_id: str, user_id: str) -> bool:
+        db: Session = SessionLocal()
+        try:
+            task: Optional[Task] = db.get(Task, task_id)
+            if task is None or str(task.user_id) != user_id:
+                return False
+            if str(task.status) in {"completed", "failed", "canceled"}:
+                return True
+
+            task.status = "cancel_requested"  # type: ignore
+            task.cancel_requested_at = datetime.now(timezone.utc)  # type: ignore
+            db.add(task)
+            db.commit()
+            return True
+        finally:
+            db.close()
+
+    def ack_cancel(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            task.status = "canceled"  # type: ignore
+            task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+            task.worker_id = None  # type: ignore
+            task.lease_token = None  # type: ignore
+            task.lease_expires_at = None  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def complete_execution(
+        self,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+        result_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            task.status = "completed"  # type: ignore
+            task.result_data = result_data  # type: ignore
+            task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+            task.worker_id = None  # type: ignore
+            task.lease_token = None  # type: ignore
+            task.lease_expires_at = None  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def fail_execution(
+        self,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+        error_message: str,
+    ) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            should_requeue = task.retry_count < task.max_retries
+            task.error_message = error_message  # type: ignore
+
+            if should_requeue:
+                task.retry_count = (task.retry_count or 0) + 1  # type: ignore
+                task.status = "queued"  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                task.heartbeat_at = None  # type: ignore
+            else:
+                task.status = "failed"  # type: ignore
+                task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def requeue_expired_leases(self) -> int:
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            expired_tasks = list(
+                db.query(Task)
+                .filter(
+                    Task.status == "leased",
+                    Task.lease_expires_at.is_not(None),
+                    Task.lease_expires_at <= now,
+                )
+                .all()
+            )
+
+            for task in expired_tasks:
+                task.status = "queued"  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                task.heartbeat_at = None  # type: ignore
+                db.add(task)
+
+            db.commit()
+            return len(expired_tasks)
+        finally:
+            db.close()
 
     # ------------------------------------------------------------------ #
     #  任务执行主循环 (daemon thread)
@@ -666,25 +856,7 @@ class TaskManager:
     #  取消任务
     # ------------------------------------------------------------------ #
     def cancel_task(self, task_id: str, user_id: str) -> bool:
-        db: Session = SessionLocal()
-        try:
-            task: Optional[Task] = db.get(Task, task_id)
-            if task is None or str(task.user_id) != user_id:
-                return False
-            if str(task.status) in {"completed", "failed", "canceled"}:
-                return True
-
-            with self._lock:
-                cancel_event = self._cancel_flags.get(task_id)
-                if cancel_event:
-                    cancel_event.set()
-
-            task.status = "cancel_requested"  # type: ignore
-            db.add(task)
-            db.commit()
-            return True
-        finally:
-            db.close()
+        return self.request_cancel(task_id, user_id)
 
     # ------------------------------------------------------------------ #
     #  查询
