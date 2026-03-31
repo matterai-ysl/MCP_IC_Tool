@@ -1,5 +1,6 @@
 import hashlib
 import json
+import mimetypes
 import os
 import threading
 import uuid
@@ -277,6 +278,77 @@ class TaskManager:
             return self.storage_service.create_download_url(str(object_key))
         return None
 
+    @staticmethod
+    def _infer_artifact_type(filename: str) -> str:
+        lower = filename.lower()
+        mapping = {
+            "outcar": "outcar",
+            "contcar": "contcar",
+            "poscar": "poscar",
+            "potcar": "potcar",
+            "doscar": "doscar",
+            "chgcar": "chgcar",
+            "chg": "chg",
+            "wavecar": "wavecar",
+            "kpoints": "kpoints",
+            "incar": "incar",
+            "result.log": "result_log",
+            "report.html": "html_report",
+            "index.html": "html_report",
+        }
+        return mapping.get(lower, mapping.get(os.path.basename(lower), "file"))
+
+    def _persist_artifact_manifest(
+        self,
+        db: Session,
+        task: Task,
+        artifact_manifest: List[Dict[str, Any]] | None,
+    ) -> None:
+        if not artifact_manifest:
+            return
+
+        existing_filenames = {
+            str(a.storage_key)
+            for a in db.query(Artifact).filter(Artifact.task_id == task.id).all()
+        }
+
+        for item in artifact_manifest:
+            filename = str(item.get("filename") or os.path.basename(str(item.get("local_path") or "")) or "artifact.bin")
+            if not filename:
+                continue
+            if any(existing.endswith(f"/{filename}") or existing == filename for existing in existing_filenames):
+                continue
+
+            content_type = item.get("content_type")
+            if content_type is None:
+                content_type = mimetypes.guess_type(filename)[0]
+
+            location = self.storage_service.build_location(
+                tenant_id=str(task.tenant_id),
+                task_id=str(task.id),
+                attempt_no=int(item.get("attempt_no", 1)),
+                filename=filename,
+            )
+            artifact = Artifact(
+                id=uuid.uuid4().hex,
+                task_id=task.id,
+                owner_type=str(item.get("owner_type", "execution")),
+                owner_id=item.get("owner_id"),
+                artifact_type=str(item.get("artifact_type") or self._infer_artifact_type(filename)),
+                storage_backend=location.storage_backend,
+                storage_key=location.object_key,
+                bucket=location.bucket,
+                object_key=location.object_key,
+                mime_type=content_type,
+                content_type=content_type,
+                size_bytes=item.get("size_bytes"),
+                checksum=item.get("sha256"),
+                etag=item.get("etag"),
+                sha256=item.get("sha256"),
+            )
+            db.add(artifact)
+            existing_filenames.add(location.object_key)
+
     def _validate_lease(
         self,
         db: Session,
@@ -384,10 +456,12 @@ class TaskManager:
         lease_token: str,
         worker_id: str,
         result_data: Optional[Dict[str, Any]] = None,
+        artifact_manifest: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         db: Session = SessionLocal()
         try:
             task = self._validate_lease(db, task_id, lease_token, worker_id)
+            self._persist_artifact_manifest(db, task, artifact_manifest)
             task.status = "completed"  # type: ignore
             task.result_data = result_data  # type: ignore
             task.finalized_at = datetime.now(timezone.utc)  # type: ignore
@@ -405,10 +479,12 @@ class TaskManager:
         lease_token: str,
         worker_id: str,
         error_message: str,
+        artifact_manifest: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         db: Session = SessionLocal()
         try:
             task = self._validate_lease(db, task_id, lease_token, worker_id)
+            self._persist_artifact_manifest(db, task, artifact_manifest)
             if str(task.status) == "cancel_requested":
                 task.status = "canceled"  # type: ignore
                 task.finalized_at = datetime.now(timezone.utc)  # type: ignore

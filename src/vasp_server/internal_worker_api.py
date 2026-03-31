@@ -145,6 +145,7 @@ def build_internal_worker_router(task_manager) -> APIRouter:
                 lease_token=request.lease_token,
                 worker_id=request.worker_id,
                 result_data=request.result_data,
+                artifact_manifest=request.artifact_manifest,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -166,6 +167,7 @@ def build_internal_worker_router(task_manager) -> APIRouter:
                 lease_token=request.lease_token,
                 worker_id=request.worker_id,
                 error_message=request.error_message,
+                artifact_manifest=request.artifact_manifest,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

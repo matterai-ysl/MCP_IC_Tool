@@ -240,6 +240,7 @@ class WorkerCompleteRequest(WorkerLeaseRequest):
 class WorkerFailRequest(WorkerLeaseRequest):
     error_message: str
     failure_code: Optional[str] = None
+    artifact_manifest: List[dict] = Field(default_factory=list)
 
 class StructOptResult(BaseModel):
     """结构优化结果模型"""
