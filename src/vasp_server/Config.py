@@ -12,6 +12,12 @@ MCP_PORT = settings.mcp_port
 VASP_remote_run_url = settings.vasp_remote_run_url
 VASP_remote_run_port = settings.vasp_remote_run_port
 static_url = settings.vasp_public_base_url
+OSS_ENDPOINT = settings.s3_endpoint or settings.oss_endpoint
+OSS_BUCKET = settings.oss_bucket
+OSS_REGION = settings.oss_region
+OSS_ACCESS_KEY_ID = settings.oss_access_key_id
+OSS_ACCESS_KEY_SECRET = settings.oss_access_key_secret
+ARTIFACT_URL_EXPIRE_SECONDS = settings.artifact_url_expire_seconds
 
 
 def get_download_url(path: str) -> str:

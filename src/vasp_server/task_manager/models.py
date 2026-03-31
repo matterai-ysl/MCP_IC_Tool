@@ -158,9 +158,14 @@ class Artifact(Base):
 
     storage_backend = Column(String, nullable=False, default="local")
     storage_key = Column(String, nullable=False)  # 本地路径 (内部)，对外不直接暴露
+    bucket = Column(String, nullable=True)
+    object_key = Column(String, nullable=True)
 
     mime_type = Column(String, nullable=True)
+    content_type = Column(String, nullable=True)
     size_bytes = Column(Float, nullable=True)
     checksum = Column(String, nullable=True)
+    etag = Column(String, nullable=True)
+    sha256 = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

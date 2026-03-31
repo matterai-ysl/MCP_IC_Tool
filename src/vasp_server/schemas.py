@@ -151,7 +151,9 @@ class ArtifactInfo(BaseModel):
     id: str
     artifact_type: str
     mime_type: Optional[str] = None
+    content_type: Optional[str] = None
     size_bytes: Optional[float] = None
+    download_url: Optional[str] = None
 
 class StructOptResponse(BaseModel):
     """结构优化响应模型"""

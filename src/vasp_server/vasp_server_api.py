@@ -757,15 +757,22 @@ def _build_task_response(task, task_id: str) -> TaskStatusResponse:
     try:
         raw_artifacts = task_manager.get_task_artifacts(task_id)
         if raw_artifacts:
-            artifacts_list = [
-                ArtifactInfo(
-                    id=str(a.id),
-                    artifact_type=str(a.artifact_type),
-                    mime_type=getattr(a, 'mime_type', None),
-                    size_bytes=getattr(a, 'size_bytes', None),
+            artifacts_list = []
+            for a in raw_artifacts:
+                download_url = task_manager.get_artifact_download_url(a)
+                content_type = getattr(a, 'content_type', None) or getattr(a, 'mime_type', None)
+                artifacts_list.append(
+                    ArtifactInfo(
+                        id=str(a.id),
+                        artifact_type=str(a.artifact_type),
+                        mime_type=getattr(a, 'mime_type', None),
+                        content_type=content_type,
+                        size_bytes=getattr(a, 'size_bytes', None),
+                        download_url=download_url,
+                    )
                 )
-                for a in raw_artifacts
-            ]
+                if str(getattr(a, 'artifact_type', '')) == "html_report" and download_url:
+                    html_report_url = download_url
     except Exception:
         pass  # artifact 查询失败不影响主响应
 

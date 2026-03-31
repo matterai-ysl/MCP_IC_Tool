@@ -15,6 +15,7 @@ from sqlalchemy import func as sa_func
 
 from .database import SessionLocal
 from .models import Task, ExecutionAttempt, AnalysisRun, Artifact
+from ..storage import ObjectStorageService
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class TaskManager:
         self._max_workers = max_workers
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self.storage_service = ObjectStorageService.from_settings()
 
     # ------------------------------------------------------------------ #
     #  提交任务
@@ -218,6 +220,62 @@ class TaskManager:
         from ..settings import settings as _settings
 
         return now + timedelta(seconds=_settings.task_lease_seconds)
+
+    def register_artifact(
+        self,
+        task_id: str,
+        artifact_type: str,
+        owner_type: str,
+        owner_id: Optional[str],
+        filename: str,
+        content_type: Optional[str] = None,
+        size_bytes: Optional[float] = None,
+        etag: Optional[str] = None,
+        sha256: Optional[str] = None,
+        attempt_no: int = 1,
+    ) -> SimpleNamespace:
+        db: Session = SessionLocal()
+        try:
+            task: Optional[Task] = db.get(Task, task_id)
+            if task is None:
+                raise ValueError(f"任务不存在: {task_id}")
+
+            location = self.storage_service.build_location(
+                tenant_id=str(task.tenant_id),
+                task_id=task_id,
+                attempt_no=attempt_no,
+                filename=filename,
+            )
+            artifact = Artifact(
+                id=uuid.uuid4().hex,
+                task_id=task_id,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                artifact_type=artifact_type,
+                storage_backend=location.storage_backend,
+                storage_key=location.object_key,
+                bucket=location.bucket,
+                object_key=location.object_key,
+                mime_type=content_type,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                checksum=sha256,
+                etag=etag,
+                sha256=sha256,
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+            return _orm_to_ns(artifact)
+        finally:
+            db.close()
+
+    def get_artifact_download_url(self, artifact: SimpleNamespace) -> Optional[str]:
+        object_key = getattr(artifact, "object_key", None) or getattr(artifact, "storage_key", None)
+        storage_backend = getattr(artifact, "storage_backend", None)
+        if storage_backend in {"oss", "s3"} and object_key:
+            return self.storage_service.create_download_url(str(object_key))
+        return None
 
     def _validate_lease(
         self,
@@ -831,6 +889,7 @@ class TaskManager:
                     artifact_type=artifact_type,
                     storage_backend="local",
                     storage_key=filepath,
+                    object_key=None,
                     size_bytes=size,
                 )
                 db.add(artifact)
@@ -847,6 +906,7 @@ class TaskManager:
                 storage_backend="local",
                 storage_key=html_url,
                 mime_type="text/html",
+                content_type="text/html",
             )
             db.add(artifact)
 

@@ -36,6 +36,16 @@ class VaspServerSettings(BaseSettings):
     mcp_port: int = 8130
     internal_worker_token: str = "worker-token"
 
+    # ---- Object storage ----
+    artifact_storage_backend: str = "oss"
+    oss_endpoint: str = "https://oss-cn-hangzhou.aliyuncs.com"
+    s3_endpoint: Optional[str] = None
+    oss_bucket: str = "vasp-artifacts"
+    oss_region: str = "cn-hangzhou"
+    oss_access_key_id: str = "test-access-key"
+    oss_access_key_secret: str = "test-secret"
+    artifact_url_expire_seconds: int = 3600
+
     # ---- Task management ----
     max_concurrent_tasks: int = 4
     default_user_id: str = "123"
