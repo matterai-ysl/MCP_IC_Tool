@@ -45,6 +45,7 @@ class VaspServerSettings(BaseSettings):
     oss_access_key_id: str = "test-access-key"
     oss_access_key_secret: str = "test-secret"
     artifact_url_expire_seconds: int = 3600
+    legacy_local_artifact_urls_enabled: bool = False
 
     # ---- Task management ----
     max_concurrent_tasks: int = 4

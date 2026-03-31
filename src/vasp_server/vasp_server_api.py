@@ -21,6 +21,7 @@ from .schemas import (
     CustomCalcRequest, CustomCalcResponse,
     AgentAnalyzeRequest, AgentAnalyzeResponse,
 )
+from .settings import settings
 from .task_manager.manager import TaskManager
 from .task_manager.database import check_and_init_db, engine
 
@@ -723,7 +724,13 @@ def _safe_analysis_status(status_val) -> AnalysisStatus | None:
 
 
 def _is_public_url(value) -> bool:
-    return isinstance(value, str) and value.startswith(("https://", "http://"))
+    if not isinstance(value, str):
+        return False
+    if value.startswith(("https://", "http://")):
+        return True
+    if settings.legacy_local_artifact_urls_enabled and value.startswith(("/static/", "/download/file/")):
+        return True
+    return False
 
 
 def _sanitize_public_value(value):
