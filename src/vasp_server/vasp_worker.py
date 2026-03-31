@@ -12,6 +12,7 @@ import time
 from .mp import download_with_criteria
 from .base import cif_to_poscar
 from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
+from .input_resolver import UpstreamInputResolver
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class VaspWorker:
         base = base_work_dir or DOWNLOAD_URL
         self.base_work_dir = Path(base) / user_id  # 为每个用户创建独立目录
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
+        self.input_resolver = UpstreamInputResolver()
     
     async def run_structure_optimization(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
@@ -362,7 +364,15 @@ class VaspWorker:
     
     async def _get_structure_for_scf(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """为自洽场计算获取结构文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
         
+        if params.get('optimized_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取优化后结构...")
+
+            resolved = self.input_resolver.resolve_for_scf(upstream_artifacts, work_dir)
+            return resolved["POSCAR"]
+
         if params.get('optimized_task_id'):
             # 从已完成的结构优化任务获取CONTCAR
             if progress_callback:
@@ -409,7 +419,14 @@ class VaspWorker:
     
     async def _prepare_dos_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为态密度计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
         
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_dos(upstream_artifacts, work_dir)
+
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
             if progress_callback:
