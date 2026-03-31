@@ -6,6 +6,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+TASK_STATES = {
+    "queued",
+    "leased",
+    "running",
+    "uploading",
+    "analyzing",
+    "completed",
+    "failed",
+    "cancel_requested",
+    "canceled",
+}
+
 # custom_incar 中禁止覆盖的关键参数（会破坏工作流或文件路径逻辑）
 _INCAR_KEY_BLACKLIST = frozenset({
     "SYSTEM",     # 内部用于标识计算类型
@@ -115,13 +127,14 @@ class StructOptRequest(BaseModel):
 class TaskStatus(str, Enum):
     """任务状态"""
     queued = "queued"
+    leased = "leased"
     running = "running"
+    uploading = "uploading"
     analyzing = "analyzing"
     completed = "completed"
     failed = "failed"
-    canceled = "canceled"
-    canceling = "canceling"
     cancel_requested = "cancel_requested"
+    canceled = "canceled"
 
 
 class AnalysisStatus(str, Enum):

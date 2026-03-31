@@ -6,6 +6,27 @@ from sqlalchemy.types import JSON
 from .database import Base
 
 
+TASK_STATE_TRANSITIONS = {
+    "queued": frozenset({"leased", "cancel_requested"}),
+    "leased": frozenset({"queued", "running", "cancel_requested"}),
+    "running": frozenset({"queued", "uploading", "cancel_requested", "failed"}),
+    "uploading": frozenset({"analyzing", "failed", "cancel_requested"}),
+    "analyzing": frozenset({"completed", "failed"}),
+    "completed": frozenset(),
+    "failed": frozenset(),
+    "cancel_requested": frozenset({"canceled"}),
+    "canceled": frozenset(),
+}
+
+
+def can_transition_task_status(current_status: str, next_status: str) -> bool:
+    return next_status in TASK_STATE_TRANSITIONS.get(current_status, frozenset())
+
+
+def resolve_runtime_failure_status(retry_count: int, max_retries: int) -> str:
+    return "queued" if retry_count < max_retries else "failed"
+
+
 def _gen_id():
     return uuid.uuid4().hex
 
@@ -17,9 +38,13 @@ class Task(Base):
     id = Column(String, primary_key=True, index=True)
     user_id = Column(String, index=True, nullable=False)
     task_type = Column(String, nullable=False)
+    tenant_id = Column(String, index=True, nullable=False, default="default")
+    queue_name = Column(String, index=True, nullable=False, default="default")
+    priority = Column(Integer, nullable=False, default=0)
 
     # --- 状态 ---
-    # queued / running / analyzing / completed / failed / cancel_requested / canceled
+    # queued / leased / running / uploading / analyzing / completed /
+    # failed / cancel_requested / canceled
     status = Column(String, index=True, nullable=False, default="queued")
     # pending / running / completed / failed
     analysis_status = Column(String, nullable=False, default="pending")
@@ -41,6 +66,14 @@ class Task(Base):
     # --- 当前关联 ---
     current_execution_attempt_id = Column(String, nullable=True)
     current_analysis_run_id = Column(String, nullable=True)
+    worker_id = Column(String, nullable=True)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=1)
 
     # --- 兼容字段 (逐步废弃) ---
     external_job_id = Column(String, nullable=True)
@@ -67,7 +100,11 @@ class ExecutionAttempt(Base):
     status = Column(String, nullable=False, default="submitting")
 
     external_job_id = Column(String, nullable=True)  # e.g. SLURM job id
+    worker_id = Column(String, nullable=True)
+    lease_token = Column(String, nullable=True)
+    scheduler_job_id = Column(String, nullable=True)
     work_directory = Column(String, nullable=True)
+    artifact_manifest = Column(JSON, nullable=True)
 
     failure_code = Column(String, nullable=True)
     failure_detail = Column(Text, nullable=True)
