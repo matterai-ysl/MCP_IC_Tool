@@ -1,7 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from typing import List
 import os
 import uvicorn
@@ -85,14 +83,6 @@ async def _startup_init():
     logger.info("🚀 启动VASP计算服务...")
     logger.info("🔧 检查并初始化数据库...")
     check_and_init_db()
-
-    from .Config import DOWNLOAD_URL
-    static_root = Path(DOWNLOAD_URL)
-    if static_root.exists():
-        app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
-        logger.info(f"📁 Static files mounted: {static_root}")
-    else:
-        logger.warning(f"⚠️  Static root does not exist, skip mount: {static_root}")
 
 # 创建全局任务管理器实例
 task_manager = TaskManager()
@@ -732,6 +722,45 @@ def _safe_analysis_status(status_val) -> AnalysisStatus | None:
         return None
 
 
+def _is_public_url(value) -> bool:
+    return isinstance(value, str) and value.startswith(("https://", "http://"))
+
+
+def _sanitize_public_value(value):
+    if isinstance(value, dict):
+        return {key: _sanitize_public_value(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_public_value(item) for item in value]
+    if isinstance(value, str) and value.startswith("/"):
+        return None
+    return value
+
+
+def _sanitize_report_urls(result_summary, result_data, html_report_url):
+    sanitized_summary = _sanitize_public_value(result_summary)
+    sanitized_data = _sanitize_public_value(result_data)
+
+    if isinstance(sanitized_summary, dict) and "html_report_url" in sanitized_summary:
+        sanitized_summary["html_report_url"] = html_report_url if _is_public_url(html_report_url) else None
+
+    report_keys = [
+        "analysis_report_html_path",
+        "html_analysis_report",
+        "md_analysis_report_html_path",
+        "dos_analysis_report_html_path",
+        "scf_analysis_report_html_path",
+        "band_structure_report_html_path",
+        "neb_report_html_path",
+        "phonon_report_html_path",
+    ]
+    if isinstance(sanitized_data, dict):
+        for key in report_keys:
+            if key in sanitized_data:
+                sanitized_data[key] = html_report_url if _is_public_url(html_report_url) else None
+
+    return sanitized_summary, sanitized_data
+
+
 def _build_task_response(task, task_id: str) -> TaskStatusResponse:
     """从 Task ORM 构建统一的 TaskStatusResponse"""
     # 从 result_summary 提取 html_report_url
@@ -776,6 +805,15 @@ def _build_task_response(task, task_id: str) -> TaskStatusResponse:
     except Exception:
         pass  # artifact 查询失败不影响主响应
 
+    if not _is_public_url(html_report_url):
+        html_report_url = None
+
+    result_data = getattr(task, 'result_data', None)
+    result_summary, result_data = _sanitize_report_urls(result_summary, result_data, html_report_url)
+    result_path = getattr(task, 'result_path', None)
+    if not _is_public_url(result_path):
+        result_path = None
+
     response_data = {
         "task_id": getattr(task, 'id', None),
         "user_id": getattr(task, 'user_id', None),
@@ -788,11 +826,11 @@ def _build_task_response(task, task_id: str) -> TaskStatusResponse:
         "artifacts": artifacts_list,
         "progress_message": getattr(task, 'progress_message', None),
         "params": getattr(task, 'params', None),
-        "result_path": getattr(task, 'result_path', None),
+        "result_path": result_path,
         "external_job_id": getattr(task, 'external_job_id', None),
         "process_id": getattr(task, 'process_id', None),
         "error_message": getattr(task, 'error_message', None),
-        "result_data": getattr(task, 'result_data', None),
+        "result_data": result_data,
         "created_at": getattr(task, 'created_at', None),
         "updated_at": getattr(task, 'updated_at', None),
     }
@@ -843,47 +881,10 @@ async def list_user_tasks(user_id: str = Query(..., description="用户ID")):
 
 @app.get("/download/file/{file_path:path}")
 async def download_file(file_path: str):
-    """
-    提供文件下载服务
-
-    Args:
-        file_path: 相对于工作目录的文件路径
-
-    Returns:
-        FileResponse: 文件下载响应
-    """
-    try:
-        from .Config import DOWNLOAD_URL
-
-        root = Path(DOWNLOAD_URL).resolve()
-        full_path = (root / file_path).resolve()
-
-        # Prevent path traversal: resolved path must stay under root.
-        try:
-            full_path.relative_to(root)
-        except ValueError:
-            raise HTTPException(status_code=403, detail="非法文件路径")
-
-        # 安全检查：确保文件路径在允许的范围内
-        if not full_path.exists():
-            raise HTTPException(status_code=404, detail=f"文件不存在: {full_path}")
-
-        if not full_path.is_file():
-            raise HTTPException(status_code=404, detail="路径不是文件")
-
-        # 获取文件名用于下载
-        filename = full_path.name
-
-        return FileResponse(
-            full_path,
-            filename=filename,
-            media_type='application/octet-stream'
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"下载文件失败: {str(e)}")
+    raise HTTPException(
+        status_code=410,
+        detail="本地文件下载已下线，请使用任务状态中的对象存储签名 URL",
+    )
 
 
 # ====================================================================== #
