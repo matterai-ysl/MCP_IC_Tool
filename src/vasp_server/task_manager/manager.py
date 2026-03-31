@@ -16,6 +16,11 @@ from sqlalchemy import func as sa_func
 
 from .database import SessionLocal
 from .models import Task, ExecutionAttempt, AnalysisRun, Artifact
+from ..notification_client import (
+    TASK_TYPE_TO_DISPLAY_NAME,
+    build_task_notification_payload,
+    send_notification_async,
+)
 from ..storage import ObjectStorageService
 
 logger = logging.getLogger(__name__)
@@ -70,6 +75,41 @@ TASK_TYPE_TO_METHOD = {
     "custom_calculation": "run_custom_calculation",
 }
 
+TASK_TYPE_TO_NOTIFICATION_METRICS = {
+    "structure_optimization": (
+        ("final_energy", "最终能量"),
+        ("final_max_force", "最终最大受力"),
+    ),
+    "scf_calculation": (
+        ("total_energy", "总能量"),
+        ("band_gap", "带隙"),
+    ),
+    "dos_calculation": (
+        ("band_gap", "带隙"),
+        ("total_energy", "总能量"),
+    ),
+    "band_structure": (
+        ("band_gap", "带隙"),
+        ("total_energy", "总能量"),
+    ),
+    "md_calculation": (
+        ("final_energy", "最终能量"),
+        ("average_temperature", "平均温度"),
+    ),
+    "neb_calculation": (
+        ("forward_barrier_eV", "正向势垒"),
+        ("reaction_energy_eV", "反应能"),
+    ),
+    "phonon_calculation": (
+        ("n_imaginary", "虚频数量"),
+        ("max_real_freq_cm1", "最大实频"),
+    ),
+    "custom_calculation": (
+        ("total_energy", "总能量"),
+        ("band_gap", "带隙"),
+    ),
+}
+
 
 def _is_retryable_error(error_msg: str) -> bool:
     """判断错误是否为可重试的基础设施故障"""
@@ -113,12 +153,101 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _format_notification_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
 class TaskManager:
     def __init__(self, max_workers: int = MAX_CONCURRENT_TASKS) -> None:
         self._max_workers = max_workers
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self.storage_service = ObjectStorageService.from_settings()
+
+    @staticmethod
+    def _notification_language(task: Task) -> str:
+        params = task.params or {}
+        language = str(params.get("notification_language") or params.get("language") or "zh")
+        return language if language in {"zh", "en"} else "zh"
+
+    @staticmethod
+    def _notification_email(task: Task) -> Optional[str]:
+        params = task.params or {}
+        email = params.get("to_email") or params.get("notification_email")
+        return str(email).strip() if email else None
+
+    @staticmethod
+    def _notification_execution_time(*sources: Optional[Dict[str, Any]]) -> Optional[float]:
+        for source in sources:
+            if not source:
+                continue
+            value = source.get("computation_time")
+            if value is None:
+                value = source.get("execution_time_seconds")
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _notification_result_summary(task_type: str, result: Optional[Dict[str, Any]]) -> str:
+        display_name = TASK_TYPE_TO_DISPLAY_NAME.get(task_type, task_type)
+        data = result or {}
+        for key, label in TASK_TYPE_TO_NOTIFICATION_METRICS.get(task_type, ()):
+            value = data.get(key)
+            if value is not None:
+                return f"{display_name}完成，{label} = {_format_notification_value(value)}"
+        return f"{display_name}完成"
+
+    @staticmethod
+    def _notification_error_message(error_message: str) -> str:
+        return " ".join(str(error_message).strip().splitlines())[:300]
+
+    def _notify_task_success(
+        self,
+        task: Task,
+        result_data: Optional[Dict[str, Any]] = None,
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = build_task_notification_payload(
+            user_id=str(task.user_id),
+            task_id=str(task.id),
+            task_type=str(task.task_type),
+            notification_type="tool_complete",
+            status="success",
+            language=self._notification_language(task),
+            execution_time_seconds=self._notification_execution_time(result_summary, result_data),
+            result_summary=self._notification_result_summary(
+                str(task.task_type),
+                result_summary or result_data,
+            ),
+            to_email=self._notification_email(task),
+        )
+        send_notification_async(payload)
+
+    def _notify_task_error(
+        self,
+        task: Task,
+        error_message: str,
+        result_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = build_task_notification_payload(
+            user_id=str(task.user_id),
+            task_id=str(task.id),
+            task_type=str(task.task_type),
+            notification_type="tool_error",
+            status="error",
+            language=self._notification_language(task),
+            execution_time_seconds=self._notification_execution_time(result_data),
+            error_message=self._notification_error_message(error_message),
+            to_email=self._notification_email(task),
+        )
+        send_notification_async(payload)
 
     # ------------------------------------------------------------------ #
     #  提交任务
@@ -468,6 +597,7 @@ class TaskManager:
             task.lease_expires_at = None  # type: ignore
             db.add(task)
             db.commit()
+            self._notify_task_success(task, result_data=result_data)
         finally:
             db.close()
 
@@ -512,6 +642,8 @@ class TaskManager:
 
             db.add(task)
             db.commit()
+            if not should_requeue and str(task.status) == "failed":
+                self._notify_task_error(task, error_message)
         finally:
             db.close()
 
@@ -728,6 +860,7 @@ class TaskManager:
                 db.commit()
                 logger.info(f"任务 {task_id[:8]}... 最终失败 (尝试 {attempt_no} 次)")
                 self._emit_completion_metrics(task_type, "failed")
+                self._notify_task_error(task, last_error, result_data=result)
 
         except Exception as exc:
             logger.error(f"任务 {task_id[:8]}... 异常: {exc}", exc_info=True)
@@ -737,6 +870,7 @@ class TaskManager:
                 task.error_message = str(exc)  # type: ignore
                 db.add(task)
                 db.commit()
+                self._notify_task_error(task, str(exc))
         finally:
             db.close()
             with self._lock:
@@ -796,6 +930,7 @@ class TaskManager:
 
         logger.info(f"任务 {task_id[:8]}... 开始分析 (run={run_id[:8]})")
 
+        summary: Optional[Dict[str, Any]] = None
         try:
             # 分析逻辑：从 exec_result 中提取摘要
             summary = self._extract_analysis_summary(task_type, exec_result)
@@ -832,6 +967,7 @@ class TaskManager:
             db.commit()
 
             logger.info(f"任务 {task_id[:8]}... 分析完成")
+            self._notify_task_success(task, result_data=exec_result, result_summary=summary)
 
         except Exception as exc:
             logger.error(f"任务 {task_id[:8]}... 分析失败: {exc}", exc_info=True)
@@ -849,6 +985,7 @@ class TaskManager:
             # 保留 result_data (原始执行结果)
             db.add(task)
             db.commit()
+            self._notify_task_success(task, result_data=exec_result, result_summary=summary)
 
     # ------------------------------------------------------------------ #
     #  提取分析摘要

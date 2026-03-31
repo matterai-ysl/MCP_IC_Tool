@@ -54,6 +54,12 @@ class VaspServerSettings(BaseSettings):
     worker_poll_interval_seconds: int = 10
     worker_heartbeat_timeout_seconds: int = 120
 
+    # ---- Notification service ----
+    notification_service_base_url: Optional[str] = None
+    notification_service_api_key: Optional[str] = None
+    notification_timeout_seconds: float = 5.0
+    notification_language: str = "zh"
+
     # ---- Quota ----
     max_user_concurrent_tasks: int = 3  # 单用户最大并发任务数
     max_user_total_tasks_per_day: int = 50  # 单用户每日最大任务提交数
