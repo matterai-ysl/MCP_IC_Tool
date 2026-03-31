@@ -64,6 +64,7 @@ def get_user_id(ctx: Context) -> str:
 @mcp.tool()
 async def submit_structure_optimization(
     cif_url: Optional[str] = None,
+    queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
     ctx: Context = None #type: ignore
@@ -96,6 +97,7 @@ async def submit_structure_optimization(
 async def submit_scf_calculation(
     cif_url: Optional[str] = None,
     optimized_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     precision: Optional[str] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
@@ -130,6 +132,7 @@ async def submit_scf_calculation(
 async def submit_dos_calculation(
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     kpoint_multiplier: Optional[float] = None,
     precision: Optional[str] = None,
@@ -167,6 +170,7 @@ async def submit_dos_calculation(
 async def submit_band_structure_calculation(
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     line_density: Optional[int] = None,
     precision: Optional[str] = None,
@@ -207,6 +211,7 @@ async def submit_band_structure_calculation(
 async def submit_md_calculation(
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     md_steps: Optional[int] = None,
     temperature: Optional[Any] = None,
     time_step: Optional[float] = None,
@@ -555,6 +560,7 @@ async def submit_neb_calculation(
     initial_task_id: Optional[str] = None,
     final_cif_url: Optional[str] = None,
     final_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     n_images: Optional[int] = None,
     kpoint_density: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
@@ -596,6 +602,7 @@ async def submit_neb_calculation(
 async def submit_phonon_calculation(
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     displacement: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
@@ -701,6 +708,7 @@ async def analyze_phonon_results(
 async def submit_custom_calculation(
     cif_url: Optional[str] = None,
     from_task_id: Optional[str] = None,
+    queue_name: Optional[str] = None,
     incar: Optional[Dict[str, Any]] = None,
     kpoint_density: Optional[float] = None,
     kpoint_mode: Optional[str] = None,
@@ -758,6 +766,7 @@ async def submit_custom_calculation(
         user_id=user_id,
         cif_url=cif_url,  # type: ignore
         from_task_id=from_task_id,
+        queue_name=queue_name,
         incar=incar or {},
         kpoint_density=kpoint_density if kpoint_density is not None else 30.0,
         kpoint_mode=kpoint_mode or "mesh",

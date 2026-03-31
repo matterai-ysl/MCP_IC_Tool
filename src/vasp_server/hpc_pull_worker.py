@@ -61,8 +61,6 @@ class PullWorker:
         lease_token = task["lease_token"]
         task_type = task["task_type"]
         params = dict(task.get("params") or {})
-        if "upstream_artifact_manifest" not in params:
-            params["upstream_artifact_manifest"] = task.get("upstream_artifact_manifest", [])
 
         scheduler_job_id: Optional[str] = None
         cancel_requested = False

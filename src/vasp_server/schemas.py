@@ -46,6 +46,7 @@ class StructOptRequest(StrictRequestModel):
     """结构优化请求模型"""
     user_id: Optional[str] = Field(None, description="用户ID")
     cif_url: HttpUrl = Field(..., description="结构文件URL")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
     kpoint_density: float = Field(30.0, description="K点密度参数")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典，用于覆盖默认参数")
     _check_custom_incar = field_validator("custom_incar")(_validate_custom_incar)
@@ -137,7 +138,6 @@ class WorkerClaimResponse(BaseModel):
     task_type: str
     queue_name: str
     params: Optional[dict] = None
-    upstream_artifact_manifest: List[dict] = Field(default_factory=list)
 
 
 class WorkerLeaseRequest(BaseModel):
@@ -184,6 +184,7 @@ class SCFRequest(StrictRequestModel):
     # 输入源（二选一）
     cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
     optimized_task_id: Optional[str] = Field(None, description="已完成的结构优化任务ID")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # VASP计算参数
     kpoint_density: float = Field(30.0, description="K点密度参数")
@@ -222,6 +223,7 @@ class DOSRequest(StrictRequestModel):
     # 输入源（二选一）
     cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
     scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # VASP计算参数
     kpoint_density: float = Field(30.0, description="K点密度参数")
@@ -263,6 +265,7 @@ class BandStructureRequest(StrictRequestModel):
     # 输入源（二选一）
     cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
     scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # VASP计算参数
     kpoint_density: float = Field(30.0, description="K点密度参数 (用于SCF步骤)")
@@ -308,6 +311,7 @@ class MDRequest(StrictRequestModel):
     # 输入源（二选一）
     cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
     scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # MD计算参数
     md_steps: int = Field(1000, description="MD步数")
@@ -389,6 +393,7 @@ class NEBRequest(StrictRequestModel):
 
     # NEB 参数
     n_images: int = Field(5, ge=2, le=20, description="中间图像数（不含端点）")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
     kpoint_density: float = Field(30.0, description="K点密度参数")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
 
@@ -417,6 +422,7 @@ class PhononRequest(StrictRequestModel):
     # 输入源（二选一）
     cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
     scf_task_id: Optional[str] = Field(None, description="已完成的SCF/优化任务ID（复用POSCAR+POTCAR）")
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # 声子参数
     kpoint_density: float = Field(30.0, description="K点密度参数")
@@ -448,6 +454,7 @@ class CustomCalcRequest(StrictRequestModel):
     from_task_id: Optional[str] = Field(
         None, description="复用已完成任务的结构（优先CONTCAR，其次POSCAR）"
     )
+    queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # INCAR — 由用户完全指定，不做黑名单过滤
     incar: Dict[str, Any] = Field(..., description="完整的INCAR参数字典，用户自行控制所有参数")

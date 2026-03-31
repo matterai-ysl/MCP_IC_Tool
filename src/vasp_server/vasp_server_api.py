@@ -161,10 +161,29 @@ def _require_completed_upstream_task(task_id: str, user_id: str, task_label: str
     return task
 
 
-def _attach_upstream_artifact_manifest(task_params: Dict[str, Any], source_task_id: str, param_name: str = "upstream_artifact_manifest") -> None:
-    manifest = task_manager.get_task_artifact_manifest(source_task_id)
-    if manifest:
-        task_params[param_name] = manifest
+def _resolve_queue_name(requested_queue_name: str | None, upstream_tasks: List[Any] | None = None) -> str:
+    requested = str(requested_queue_name).strip() if requested_queue_name else None
+    upstream_queue_names = {
+        str(getattr(task, "queue_name", "default") or "default")
+        for task in (upstream_tasks or [])
+        if task is not None
+    }
+    if not upstream_queue_names:
+        return requested or "default"
+
+    if len(upstream_queue_names) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="上游任务位于不同 queue_name，无法在不同超算之间直接续算",
+        )
+
+    upstream_queue_name = next(iter(upstream_queue_names))
+    if requested and requested != upstream_queue_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"queue_name 必须与上游任务一致: {upstream_queue_name}",
+        )
+    return upstream_queue_name
 
 
 @app.post("/vasp/structure-optimization", response_model=StructOptResponse)
@@ -173,6 +192,7 @@ async def submit_structure_optimization(request: StructOptRequest):
     try:
         task_params = {
             "cif_url": str(request.cif_url),
+            "queue_name": _resolve_queue_name(request.queue_name),
             "kpoint_density": request.kpoint_density,
         }
         if request.user_id is None:
@@ -208,21 +228,22 @@ async def submit_scf_calculation(request: SCFRequest):
             )
         
         # 如果基于优化任务，验证任务存在性
+        upstream_task = None
         if request.optimized_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.optimized_task_id,
                 request.user_id,
                 "结构优化任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "optimized_task_id": request.optimized_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "precision": request.precision,
         }
-        if request.optimized_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.optimized_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="scf_calculation",
@@ -256,22 +277,23 @@ async def submit_dos_calculation(request: DOSRequest):
             )
         
         # 如果基于自洽场任务，验证任务存在性
+        upstream_task = None
         if request.scf_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.scf_task_id,
                 request.user_id,
                 "自洽场计算任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "kpoint_multiplier": request.kpoint_multiplier,
             "precision": request.precision,
         }
-        if request.scf_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="dos_calculation",
@@ -309,22 +331,23 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
                 detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
 
+        upstream_task = None
         if request.scf_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.scf_task_id,
                 request.user_id,
                 "自洽场计算任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
 
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "line_density": request.line_density,
             "precision": request.precision,
         }
-        if request.scf_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -362,24 +385,25 @@ async def submit_md_calculation(request: MDRequest):
             )
         
         # 如果基于自洽场任务，验证任务存在性
+        upstream_task = None
         if request.scf_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.scf_task_id,
                 request.user_id,
                 "自洽场计算任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "md_steps": request.md_steps,
             "temperature": float(request.temperature),
             "time_step": request.time_step,
             "ensemble": request.ensemble,
             "precision": request.precision,
         }
-        if request.scf_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="md_calculation",
@@ -409,41 +433,32 @@ async def submit_md_calculation(request: MDRequest):
 async def submit_neb_calculation(request: NEBRequest):
     """提交 NEB（过渡态）计算任务"""
     try:
+        upstream_tasks = []
         if request.initial_task_id:
-            _require_completed_upstream_task(
+            upstream_tasks.append(_require_completed_upstream_task(
                 request.initial_task_id,
                 request.user_id,
                 "初始态任务",
-            )
+            ))
         if request.final_task_id:
-            _require_completed_upstream_task(
+            upstream_tasks.append(_require_completed_upstream_task(
                 request.final_task_id,
                 request.user_id,
                 "终态任务",
-            )
+            ))
+        queue_name = _resolve_queue_name(request.queue_name, upstream_tasks)
 
         task_params = {
             "initial_cif_url": str(request.initial_cif_url) if request.initial_cif_url else None,
             "initial_task_id": request.initial_task_id,
             "final_cif_url": str(request.final_cif_url) if request.final_cif_url else None,
             "final_task_id": request.final_task_id,
+            "queue_name": queue_name,
             "n_images": request.n_images,
             "kpoint_density": request.kpoint_density,
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
-        if request.initial_task_id:
-            _attach_upstream_artifact_manifest(
-                task_params,
-                request.initial_task_id,
-                param_name="initial_upstream_artifact_manifest",
-            )
-        if request.final_task_id:
-            _attach_upstream_artifact_manifest(
-                task_params,
-                request.final_task_id,
-                param_name="final_upstream_artifact_manifest",
-            )
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -466,22 +481,23 @@ async def submit_neb_calculation(request: NEBRequest):
 async def submit_phonon_calculation(request: PhononRequest):
     """提交声子计算任务（IBRION=6，Gamma 点有限位移法）"""
     try:
+        upstream_task = None
         if request.scf_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.scf_task_id,
                 request.user_id,
                 "上游任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "displacement": request.displacement,
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
-        if request.scf_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -504,21 +520,22 @@ async def submit_phonon_calculation(request: PhononRequest):
 async def submit_custom_calculation(request: CustomCalcRequest):
     """提交通用自定义计算任务 — 用户完全控制INCAR，适合HSE06、DFPT介电、ELF、Wannier等长尾需求"""
     try:
+        upstream_task = None
         if request.from_task_id:
-            _require_completed_upstream_task(
+            upstream_task = _require_completed_upstream_task(
                 request.from_task_id,
                 request.user_id,
                 "上游任务",
             )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         task_params: Dict[str, Any] = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "from_task_id": request.from_task_id,
+            "queue_name": queue_name,
             "incar": request.incar,
             "kpoint_density": request.kpoint_density,
             "kpoint_mode": request.kpoint_mode,
         }
-        if request.from_task_id:
-            _attach_upstream_artifact_manifest(task_params, request.from_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,

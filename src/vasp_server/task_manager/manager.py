@@ -82,6 +82,7 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
     # 只取影响计算结果的关键参数，忽略 user_id 等
     key_fields = {
         "task_type": task_type,
+        "queue_name": params.get("queue_name"),
         "cif_url": params.get("cif_url"),
         "optimized_task_id": params.get("optimized_task_id"),
         "scf_task_id": params.get("scf_task_id"),

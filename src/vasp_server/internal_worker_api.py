@@ -79,7 +79,6 @@ def build_internal_worker_router(task_manager) -> APIRouter:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
         params = getattr(claimed, "params", {}) or {}
-        upstream_artifact_manifest = params.get("upstream_artifact_manifest", [])
         return WorkerClaimResponse(
             task_id=str(claimed.id),
             status=TaskStatus(str(claimed.status)),
@@ -89,7 +88,6 @@ def build_internal_worker_router(task_manager) -> APIRouter:
             task_type=str(claimed.task_type),
             queue_name=str(claimed.queue_name),
             params=params,
-            upstream_artifact_manifest=upstream_artifact_manifest,
         )
 
     @router.post(

@@ -78,6 +78,26 @@ def test_submit_task_only_creates_db_record_and_returns_task_id(db_session):
     assert attempts == []
 
 
+def test_submit_initial_task_accepts_explicit_queue_name(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/structure-optimization",
+        json={
+            "user_id": "test_user",
+            "cif_url": "https://structures.example.com/Li2O.cif",
+            "queue_name": "hpc-a",
+        },
+    )
+
+    assert response.status_code == 200
+    task = db_session.get(Task, response.json()["task_id"])
+    assert task is not None
+    assert task.queue_name == "hpc-a"
+
+
 def test_submit_task_rejects_formula_input(db_session):
     from src.vasp_server.vasp_server_api import app
 
@@ -114,7 +134,7 @@ def test_status_endpoint_hydrates_artifact_urls_from_db_metadata(task_manager, d
     assert payload["artifacts"][0]["download_url"].startswith("https://")
 
 
-def test_submit_with_upstream_task_id_injects_artifact_manifest(task_manager, db_session):
+def test_submit_with_upstream_task_id_inherits_upstream_queue_and_only_matching_queue_can_claim(task_manager, db_session):
     from src.vasp_server.vasp_server_api import app
 
     upstream_task_id = _create_task(
@@ -122,16 +142,7 @@ def test_submit_with_upstream_task_id_injects_artifact_manifest(task_manager, db
         task_type="structure_optimization",
         status="completed",
         analysis_status="completed",
-    )
-    task_manager.register_artifact(
-        task_id=upstream_task_id,
-        artifact_type="contcar",
-        owner_type="execution",
-        owner_id="attempt-1",
-        filename="CONTCAR",
-        content_type="text/plain",
-        size_bytes=128.0,
-        attempt_no=1,
+        queue_name="hpc-a",
     )
 
     response = _request(
@@ -145,10 +156,41 @@ def test_submit_with_upstream_task_id_injects_artifact_manifest(task_manager, db
     task_id = response.json()["task_id"]
     task = db_session.get(Task, task_id)
     assert task is not None
-    manifest = (task.params or {}).get("upstream_artifact_manifest", [])
-    assert manifest
-    assert manifest[0]["artifact_type"] == "contcar"
-    assert manifest[0]["download_url"].startswith("https://")
+    assert task.queue_name == "hpc-a"
+    assert "upstream_artifact_manifest" not in (task.params or {})
+
+    other_queue_claim = task_manager.claim_next_task(worker_id="worker-b", queue_name="hpc-b")
+    assert other_queue_claim is None
+
+    matching_queue_claim = task_manager.claim_next_task(worker_id="worker-a", queue_name="hpc-a")
+    assert matching_queue_claim is not None
+    assert matching_queue_claim.id == task_id
+
+
+def test_submit_with_conflicting_queue_name_and_upstream_task_is_rejected(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    upstream_task_id = _create_task(
+        db_session,
+        task_type="structure_optimization",
+        status="completed",
+        analysis_status="completed",
+        queue_name="hpc-a",
+    )
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/scf-calculation",
+        json={
+            "user_id": "test_user",
+            "optimized_task_id": upstream_task_id,
+            "queue_name": "hpc-b",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "queue_name" in response.json()["detail"]
 
 
 def test_mcp_client_still_works_with_public_api_shape():

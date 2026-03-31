@@ -34,7 +34,6 @@ class DirectControlPlaneClient:
             "task_type": claimed.task_type,
             "lease_token": claimed.lease_token,
             "params": claimed.params,
-            "upstream_artifact_manifest": (claimed.params or {}).get("upstream_artifact_manifest", []),
         }
 
     def mark_running(self, task_id: str, lease_token: str):
@@ -88,10 +87,10 @@ class FakeStructureWorker:
 
 class FakeSCFWorker:
     def __init__(self):
-        self.seen_manifest = None
+        self.seen_params = None
 
     async def run_scf_calculation(self, task_id, params, progress_callback=None):
-        self.seen_manifest = params.get("upstream_artifact_manifest")
+        self.seen_params = dict(params)
         if progress_callback:
             await progress_callback(20, "running", pid=23456)
         return {"success": True, "work_directory": "/tmp/scf-work", "total_energy": -20.0}
@@ -133,29 +132,19 @@ def test_end_to_end_structure_optimization_flow(tmp_path):
     assert payload["artifacts"][0]["download_url"].startswith("https://")
 
 
-def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_path, db_session):
+def test_end_to_end_scf_stays_on_upstream_queue_and_cancel_running_task(tmp_path, db_session):
     from src.vasp_server.vasp_server_api import app, task_manager
 
     upstream_task_id = task_manager.submit_task(
         user_id="test_user",
         task_type="structure_optimization",
-        params={"cif_url": "https://structures.example.com/Li2O.cif"},
+        params={"cif_url": "https://structures.example.com/Li2O.cif", "queue_name": "hpc-a"},
     )
     task = db_session.get(Task, upstream_task_id)
     task.status = "completed"
     task.analysis_status = "completed"
     db_session.add(task)
     db_session.commit()
-    task_manager.register_artifact(
-        task_id=upstream_task_id,
-        artifact_type="contcar",
-        owner_type="execution",
-        owner_id="attempt-1",
-        filename="CONTCAR",
-        content_type="text/plain",
-        size_bytes=128.0,
-        attempt_no=1,
-    )
     submit_response = _request(
         app,
         "POST",
@@ -164,14 +153,22 @@ def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_pat
     )
     assert submit_response.status_code == 200
 
+    other_queue_worker = PullWorker(
+        control_plane_client=DirectControlPlaneClient(task_manager, worker_id="hpc-b", queue_name="hpc-b"),
+        execution_worker=FakeSCFWorker(),
+    )
+    assert other_queue_worker.run_once() is False
+
     scf_worker = FakeSCFWorker()
     PullWorker(
-        control_plane_client=DirectControlPlaneClient(task_manager),
+        control_plane_client=DirectControlPlaneClient(task_manager, worker_id="hpc-a", queue_name="hpc-a"),
         execution_worker=scf_worker,
     ).run_once()
 
-    assert scf_worker.seen_manifest is not None
-    assert scf_worker.seen_manifest[0]["artifact_type"] == "contcar"
+    assert scf_worker.seen_params is not None
+    assert scf_worker.seen_params["optimized_task_id"] == upstream_task_id
+    assert scf_worker.seen_params["queue_name"] == "hpc-a"
+    assert "upstream_artifact_manifest" not in scf_worker.seen_params
 
     cancel_task_id = task_manager.submit_task(
         user_id="test_user",

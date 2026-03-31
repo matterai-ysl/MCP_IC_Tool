@@ -16,11 +16,8 @@ def _create_task(db_session, **overrides):
         task_type="structure_optimization",
         status="queued",
         analysis_status="pending",
-        params={
-            "formula": "Li2O",
-            "upstream_artifact_manifest": [{"artifact_type": "contcar", "object_key": "tenant/task/CONTCAR"}],
-        },
-        input_snapshot={"formula": "Li2O"},
+        params={"cif_url": "https://structures.example.com/Li2O.cif"},
+        input_snapshot={"cif_url": "https://structures.example.com/Li2O.cif"},
         queue_name="default",
         tenant_id="default",
         priority=0,
@@ -70,10 +67,8 @@ def test_worker_claim_endpoint_returns_leased_task(app, db_session):
     assert payload["task_id"] == task_id
     assert payload["status"] == "leased"
     assert payload["lease_token"]
-    assert payload["params"]["formula"] == "Li2O"
-    assert payload["upstream_artifact_manifest"] == [
-        {"artifact_type": "contcar", "object_key": "tenant/task/CONTCAR"},
-    ]
+    assert payload["params"]["cif_url"] == "https://structures.example.com/Li2O.cif"
+    assert "upstream_artifact_manifest" not in payload
 
 
 def test_internal_worker_api_rejects_invalid_token(app, db_session):

@@ -97,3 +97,27 @@ def test_request_cancel_marks_task_and_timestamp(task_manager, db_session):
     assert stored_task is not None
     assert stored_task.status == "cancel_requested"
     assert stored_task.cancel_requested_at is not None
+
+
+def test_submit_task_dedup_is_scoped_by_queue_name(task_manager, db_session):
+    first_task_id = task_manager.submit_task(
+        user_id="test_user",
+        task_type="structure_optimization",
+        params={"cif_url": "https://structures.example.com/Li2O.cif", "queue_name": "hpc-a"},
+    )
+    first_task = db_session.get(Task, first_task_id)
+    assert first_task is not None
+    first_task.status = "completed"
+    db_session.add(first_task)
+    db_session.commit()
+
+    second_task_id = task_manager.submit_task(
+        user_id="test_user",
+        task_type="structure_optimization",
+        params={"cif_url": "https://structures.example.com/Li2O.cif", "queue_name": "hpc-b"},
+    )
+
+    assert second_task_id != first_task_id
+    second_task = db_session.get(Task, second_task_id)
+    assert second_task is not None
+    assert second_task.queue_name == "hpc-b"
