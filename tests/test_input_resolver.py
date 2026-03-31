@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import pytest
 
 from src.vasp_server.input_resolver import UpstreamInputResolver
 from src.vasp_server.vasp_worker import VaspWorker
@@ -52,29 +53,15 @@ def test_dos_resolves_charge_and_wavefunction_from_manifest(tmp_path):
     assert (work_dir / "WAVECAR").read_text(encoding="utf-8") == "wavecar"
 
 
-def test_formula_fallback_for_scf_still_works(tmp_path, monkeypatch):
+def test_formula_input_is_no_longer_supported_for_scf(tmp_path):
     worker = VaspWorker(user_id="u1", base_work_dir=str(tmp_path / "workspace"))
     work_dir = worker.base_work_dir / "scf-task"
     work_dir.mkdir(parents=True, exist_ok=True)
-    cif_path = _write_file(work_dir / "structure.cif", "cif-data")
-    poscar_path = work_dir / "POSCAR"
 
-    async def fake_get_cif_file(_work_dir, _params, _progress_callback=None):
-        return str(cif_path)
-
-    async def fake_convert(_cif_path, _work_dir, _params):
-        poscar_path.write_text("generated-from-cif", encoding="utf-8")
-        return str(poscar_path)
-
-    monkeypatch.setattr(worker, "_get_cif_file", fake_get_cif_file)
-    monkeypatch.setattr(worker, "_convert_cif_to_poscar", fake_convert)
-
-    resolved = asyncio.run(
-        worker._get_structure_for_scf(
-            work_dir,
-            {"formula": "Li2O"},
+    with pytest.raises(Exception, match="cif_url 或 optimized_task_id"):
+        asyncio.run(
+            worker._get_structure_for_scf(
+                work_dir,
+                {"formula": "Li2O"},
+            )
         )
-    )
-
-    assert resolved == str(poscar_path)
-    assert poscar_path.read_text(encoding="utf-8") == "generated-from-cif"

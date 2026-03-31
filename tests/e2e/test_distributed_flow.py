@@ -112,7 +112,7 @@ def test_end_to_end_structure_optimization_flow(tmp_path):
         app,
         "POST",
         "/vasp/structure-optimization",
-        json={"user_id": "test_user", "formula": "Li2O"},
+        json={"user_id": "test_user", "cif_url": "https://structures.example.com/Li2O.cif"},
     )
     assert submit_response.status_code == 200
     task_id = submit_response.json()["task_id"]
@@ -161,7 +161,7 @@ def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_pat
     cancel_task_id = task_manager.submit_task(
         user_id="test_user",
         task_type="structure_optimization",
-        params={"formula": "Li2O"},
+        params={"cif_url": "https://structures.example.com/Li2O.cif"},
     )
     PullWorker(
         control_plane_client=DirectControlPlaneClient(

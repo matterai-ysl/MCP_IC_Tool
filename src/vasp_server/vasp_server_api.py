@@ -148,44 +148,14 @@ def _record_task_submitted(task_type: str):
 
 @app.post("/vasp/structure-optimization", response_model=StructOptResponse)
 async def submit_structure_optimization(request: StructOptRequest):
-    """
-    提交结构优化任务
-    
-    支持两种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    
-    Returns:
-        StructOptResponse: 包含任务ID和状态的响应
-    """
+    """提交结构优化任务。"""
     try:
-        # 准备任务参数 (input validation is handled by StructOptRequest's model_post_init)
         task_params = {
-            "formula": request.formula,
-            "cif_url": str(request.cif_url) if request.cif_url else None,
-
+            "cif_url": str(request.cif_url),
             "kpoint_density": request.kpoint_density,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
         if request.user_id is None:
             request.user_id = os.getenv("DEFAULT_USER_ID", "123")
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="structure_optimization",
@@ -207,28 +177,13 @@ async def submit_structure_optimization(request: StructOptRequest):
 
 @app.post("/vasp/scf-calculation", response_model=SCFResponse)
 async def submit_scf_calculation(request: SCFRequest):
-    """
-    提交自洽场计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    3. 优化任务ID：基于已完成的结构优化任务的CONTCAR文件
-    
-    Returns:
-        SCFResponse: 包含任务ID和状态的响应
-    """
+    """提交自洽场计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.optimized_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.optimized_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 optimized_task_id 中的一个"
+                detail="必须提供 cif_url 或 optimized_task_id 中的一个"
             )
         
         # 如果基于优化任务，验证任务存在性
@@ -245,34 +200,12 @@ async def submit_scf_calculation(request: SCFRequest):
                     detail=f"结构优化任务 {request.optimized_task_id} 尚未完成"
                 )
         
-        # 准备任务参数
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "optimized_task_id": request.optimized_task_id,
-
             "kpoint_density": request.kpoint_density,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="scf_calculation",
@@ -280,7 +213,7 @@ async def submit_scf_calculation(request: SCFRequest):
         )
         _record_task_submitted("scf_calculation")
 
-        input_source = "化学式" if request.formula else "CIF URL" if request.cif_url else "结构优化任务"
+        input_source = "结构 URL" if request.cif_url else "结构优化任务"
         
         return SCFResponse(
             task_id=task_id,
@@ -296,28 +229,13 @@ async def submit_scf_calculation(request: SCFRequest):
 
 @app.post("/vasp/dos-calculation", response_model=DOSResponse)
 async def submit_dos_calculation(request: DOSRequest):
-    """
-    提交态密度计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件（需要先完成自洽场计算）
-    2. CIF URL：直接从指定URL下载CIF文件（需要先完成自洽场计算）
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果
-    
-    Returns:
-        DOSResponse: 包含任务ID和状态的响应
-    """
+    """提交态密度计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
         
         # 如果基于自洽场任务，验证任务存在性
@@ -334,35 +252,13 @@ async def submit_dos_calculation(request: DOSRequest):
                     detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
                 )
         
-        # 准备任务参数
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
-
             "kpoint_density": request.kpoint_density,
             "kpoint_multiplier": request.kpoint_multiplier,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="dos_calculation",
@@ -373,11 +269,8 @@ async def submit_dos_calculation(request: DOSRequest):
         if request.scf_task_id:
             input_source = "自洽场计算任务"
             calc_mode = "态密度计算"
-        elif request.formula:
-            input_source = "化学式"
-            calc_mode = "单点自洽+DOS计算"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
             calc_mode = "单点自洽+DOS计算"
         
         return DOSResponse(
@@ -394,27 +287,13 @@ async def submit_dos_calculation(request: DOSRequest):
 
 @app.post("/vasp/band-structure", response_model=BandStructureResponse)
 async def submit_band_structure_calculation(request: BandStructureRequest):
-    """
-    提交能带结构计算任务
-
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果（推荐）
-
-    Returns:
-        BandStructureResponse: 包含任务ID和状态的响应
-    """
+    """提交能带结构计算任务。"""
     try:
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url),
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400,
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
 
         if request.scf_task_id:
@@ -431,28 +310,12 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
                 )
 
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
             "kpoint_density": request.kpoint_density,
             "line_density": request.line_density,
             "precision": request.precision,
         }
-
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -463,10 +326,8 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
 
         if request.scf_task_id:
             input_source = "自洽场计算任务"
-        elif request.formula:
-            input_source = "化学式"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
 
         return BandStructureResponse(
             task_id=task_id,
@@ -482,28 +343,13 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
 
 @app.post("/vasp/md-calculation", response_model=MDResponse)
 async def submit_md_calculation(request: MDRequest):
-    """
-    提交分子动力学计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件（纯MD计算）
-    2. CIF URL：直接从指定URL下载CIF文件（纯MD计算）
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果
-    
-    Returns:
-        MDResponse: 包含任务ID和状态的响应
-    """
+    """提交分子动力学计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
         
         # 如果基于自洽场任务，验证任务存在性
@@ -520,37 +366,15 @@ async def submit_md_calculation(request: MDRequest):
                     detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
                 )
         
-        # 准备任务参数（temperature 始终为单个 float）
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
-
             "md_steps": request.md_steps,
             "temperature": float(request.temperature),
             "time_step": request.time_step,
             "ensemble": request.ensemble,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="md_calculation",
@@ -561,11 +385,8 @@ async def submit_md_calculation(request: MDRequest):
         if request.scf_task_id:
             input_source = "自洽场计算任务"
             calc_mode = "分子动力学计算"
-        elif request.formula:
-            input_source = "化学式"
-            calc_mode = "纯MD计算"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
             calc_mode = "纯MD计算"
         
         return MDResponse(
@@ -584,18 +405,12 @@ async def submit_neb_calculation(request: NEBRequest):
     """提交 NEB（过渡态）计算任务"""
     try:
         task_params = {
-            "initial_formula": request.initial_formula,
             "initial_cif_url": str(request.initial_cif_url) if request.initial_cif_url else None,
             "initial_task_id": request.initial_task_id,
-            "final_formula": request.final_formula,
             "final_cif_url": str(request.final_cif_url) if request.final_cif_url else None,
             "final_task_id": request.final_task_id,
             "n_images": request.n_images,
             "kpoint_density": request.kpoint_density,
-            "spacegroup": request.spacegroup,
-            "max_energy_above_hull": request.max_energy_above_hull,
-            "stable_only": request.stable_only,
-            "selection_mode": request.selection_mode.value,
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
@@ -622,18 +437,11 @@ async def submit_phonon_calculation(request: PhononRequest):
     """提交声子计算任务（IBRION=6，Gamma 点有限位移法）"""
     try:
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
             "kpoint_density": request.kpoint_density,
             "displacement": request.displacement,
         }
-        if request.formula:
-            for k in ("spacegroup", "max_energy_above_hull", "min_band_gap", "max_band_gap",
-                      "max_nsites", "min_nsites", "stable_only", "selection_mode"):
-                v = getattr(request, k)
-                if v is not None:
-                    task_params[k] = v.value if hasattr(v, 'value') else v
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
 
@@ -659,19 +467,12 @@ async def submit_custom_calculation(request: CustomCalcRequest):
     """提交通用自定义计算任务 — 用户完全控制INCAR，适合HSE06、DFPT介电、ELF、Wannier等长尾需求"""
     try:
         task_params: Dict[str, Any] = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "from_task_id": request.from_task_id,
             "incar": request.incar,
             "kpoint_density": request.kpoint_density,
             "kpoint_mode": request.kpoint_mode,
         }
-        if request.formula:
-            for k in ("spacegroup", "max_energy_above_hull", "min_band_gap", "max_band_gap",
-                      "max_nsites", "min_nsites", "stable_only", "selection_mode"):
-                v = getattr(request, k)
-                if v is not None:
-                    task_params[k] = v.value if hasattr(v, "value") else v
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,

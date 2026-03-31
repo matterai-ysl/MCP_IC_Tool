@@ -63,16 +63,7 @@ def get_user_id(ctx: Context) -> str:
 
 @mcp.tool()
 async def submit_structure_optimization(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
     ctx: Context = None #type: ignore
@@ -87,21 +78,13 @@ async def submit_structure_optimization(
     LDA+U parameters are auto-generated based on the elements in the structure.
 
     Parameters:
-    - formula (optional): Chemical formula, e.g. 'Li2O', 'LiFePO4', choose one between formula and cif_url
-    - cif_url (optional): URL address of CIF file, choose one between formula and cif_url
-    - spacegroup (optional): Space group symbol, e.g. "P1", "Fm-3m", only valid when using formula
-    - max_energy_above_hull (optional): Maximum energy above hull (eV/atom), default 0.1
-    - min_band_gap / max_band_gap (optional): Band gap filter (eV)
-    - max_nsites / min_nsites (optional): Atom count filter
-    - stable_only (optional): Only select stable materials, default true
-    - selection_mode (optional): "auto"/"stable"/"first"
+    - cif_url (required): URL address of the structure file
     - kpoint_density (optional): K-point density parameter, default 30.0
     - custom_incar (optional): Dict to override/add INCAR parameters.
       Examples: {"EDIFF": 1e-7, "ENCUT": 600}, {"IVDW": 12} to enable vdW correction
 
     Examples:
-    submit_structure_optimization(formula="Li2O")
-    submit_structure_optimization(formula="Li2O", custom_incar={"IVDW": 12, "EDIFF": 1e-7})
+    submit_structure_optimization(cif_url="https://example.com/structure.cif")
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -111,17 +94,8 @@ async def submit_structure_optimization(
 
 @mcp.tool()
 async def submit_scf_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     optimized_task_id: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     precision: Optional[str] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
@@ -135,15 +109,8 @@ async def submit_scf_calculation(
     Override any parameter via custom_incar.
 
     Parameters:
-    - formula (optional): Chemical formula, choose one among formula, cif_url, and optimized_task_id
-    - cif_url (optional): URL of CIF file
+    - cif_url (optional): URL of structure file
     - optimized_task_id (optional): Completed structure optimization task ID
-    - spacegroup (optional): Space group symbol, only valid when using formula
-    - max_energy_above_hull (optional): default 0.1 eV/atom
-    - min_band_gap / max_band_gap (optional): Band gap filter (eV)
-    - max_nsites / min_nsites (optional): Atom count filter
-    - stable_only (optional): default true
-    - selection_mode (optional): "auto"/"stable"/"first"
     - kpoint_density (optional): default 30.0
     - precision (optional): "Normal"/"High"/"Accurate", default "Accurate"
     - custom_incar (optional): Dict to override/add INCAR parameters.
@@ -151,7 +118,7 @@ async def submit_scf_calculation(
 
     Examples:
     submit_scf_calculation(optimized_task_id="task_001")
-    submit_scf_calculation(formula="Li2O", custom_incar={"ISMEAR": -5})
+    submit_scf_calculation(cif_url="https://example.com/structure.cif", custom_incar={"ISMEAR": -5})
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -161,17 +128,8 @@ async def submit_scf_calculation(
 
 @mcp.tool()
 async def submit_dos_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     kpoint_multiplier: Optional[float] = None,
     precision: Optional[str] = None,
@@ -187,15 +145,8 @@ async def submit_dos_calculation(
     Override any parameter via custom_incar.
 
     Parameters:
-    - formula (optional): Chemical formula, choose one among formula, cif_url, and scf_task_id
-    - cif_url (optional): URL of CIF file
+    - cif_url (optional): URL of structure file
     - scf_task_id (optional): Completed SCF task ID
-    - spacegroup (optional): Space group symbol, only valid when using formula
-    - max_energy_above_hull (optional): default 0.1 eV/atom
-    - min_band_gap / max_band_gap (optional): Band gap filter (eV)
-    - max_nsites / min_nsites (optional): Atom count filter
-    - stable_only (optional): default true
-    - selection_mode (optional): "auto"/"stable"/"first"
     - kpoint_density (optional): default 30.0
     - kpoint_multiplier (optional): K-point multiplier vs optimization, default 2.0
     - precision (optional): "Normal"/"High"/"Accurate", default "Accurate"
@@ -204,7 +155,7 @@ async def submit_dos_calculation(
 
     Examples:
     submit_dos_calculation(scf_task_id="scf_001", kpoint_multiplier=3.0)
-    submit_dos_calculation(formula="Li2O", custom_incar={"LORBIT": 11, "NEDOS": 3000})
+    submit_dos_calculation(cif_url="https://example.com/structure.cif", custom_incar={"LORBIT": 11, "NEDOS": 3000})
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -214,17 +165,8 @@ async def submit_dos_calculation(
 
 @mcp.tool()
 async def submit_band_structure_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     line_density: Optional[int] = None,
     precision: Optional[str] = None,
@@ -244,15 +186,8 @@ async def submit_band_structure_calculation(
     using pymatgen's HighSymmKpath.
 
     Parameters:
-    - formula (optional): Chemical formula, choose one among formula, cif_url, and scf_task_id
-    - cif_url (optional): URL of CIF file
+    - cif_url (optional): URL of structure file
     - scf_task_id (optional): Completed SCF task ID (recommended — avoids redundant SCF step)
-    - spacegroup (optional): Space group symbol, only valid when using formula
-    - max_energy_above_hull (optional): default 0.1 eV/atom
-    - min_band_gap / max_band_gap (optional): Band gap filter (eV)
-    - max_nsites / min_nsites (optional): Atom count filter
-    - stable_only (optional): default true
-    - selection_mode (optional): "auto"/"stable"/"first"
     - kpoint_density (optional): K-point density for the SCF step, default 30.0
     - line_density (optional): Number of k-points per segment along high-symmetry path, default 20
     - precision (optional): "Normal"/"High"/"Accurate", default "Accurate"
@@ -260,7 +195,7 @@ async def submit_band_structure_calculation(
 
     Examples:
     submit_band_structure_calculation(scf_task_id="scf_001")
-    submit_band_structure_calculation(formula="Si", line_density=30)
+    submit_band_structure_calculation(cif_url="https://example.com/structure.cif", line_density=30)
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -270,17 +205,8 @@ async def submit_band_structure_calculation(
 
 @mcp.tool()
 async def submit_md_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     md_steps: Optional[int] = None,
     temperature: Optional[Any] = None,
     time_step: Optional[float] = None,
@@ -303,15 +229,8 @@ async def submit_md_calculation(
     K-points: fixed 1x1x1 Gamma for MD.
 
     Parameters:
-    - formula (optional): Chemical formula, choose one among formula, cif_url, and scf_task_id
-    - cif_url (optional): URL of CIF file
+    - cif_url (optional): URL of structure file
     - scf_task_id (optional): Completed SCF task ID
-    - spacegroup (optional): Space group symbol, only valid when using formula
-    - max_energy_above_hull (optional): default 0.1 eV/atom
-    - min_band_gap / max_band_gap (optional): Band gap filter (eV)
-    - max_nsites / min_nsites (optional): Atom count filter
-    - stable_only (optional): default true
-    - selection_mode (optional): "auto"/"stable"/"first"
     - md_steps (optional): Number of MD steps, default 1000
     - temperature (optional): Target temperature (K). Single float (300.0) or list of floats ([300, 400, 500])
     - time_step (optional): Time step (fs), default 1.0
@@ -324,8 +243,8 @@ async def submit_md_calculation(
     - Multiple temperatures: {"tasks": [{"temperature": 300, "task_id": "..."}, ...], "message": "..."}
 
     Examples:
-    submit_md_calculation(formula="Li2O", md_steps=2000, temperature=350.0)
-    submit_md_calculation(formula="Li2O", temperature=[300.0, 400.0, 500.0], md_steps=1500)
+    submit_md_calculation(cif_url="https://example.com/structure.cif", md_steps=2000, temperature=350.0)
+    submit_md_calculation(cif_url="https://example.com/structure.cif", temperature=[300.0, 400.0, 500.0], md_steps=1500)
     """
     user_id = get_user_id(ctx)
 
@@ -616,7 +535,7 @@ async def analyze_md_multi_results(
     - task_ids (required): List of completed MD task IDs (at least 1, typically 3+)
 
     Workflow:
-    1. Submit individual MD tasks: submit_md_calculation(formula="Li2O", temperature=[300, 400, 500])
+    1. Submit individual MD tasks: submit_md_calculation(cif_url="https://example.com/structure.cif", temperature=[300, 400, 500])
     2. Wait for all tasks to complete: get_task_status(task_id) for each
     3. Run aggregation: analyze_md_multi_results(task_ids=["id1", "id2", "id3"])
 
@@ -632,17 +551,11 @@ async def analyze_md_multi_results(
 
 @mcp.tool()
 async def submit_neb_calculation(
-    initial_formula: Optional[str] = None,
     initial_cif_url: Optional[str] = None,
     initial_task_id: Optional[str] = None,
-    final_formula: Optional[str] = None,
     final_cif_url: Optional[str] = None,
     final_task_id: Optional[str] = None,
     n_images: Optional[int] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
     ctx: Context = None,  # type: ignore
@@ -658,12 +571,11 @@ async def submit_neb_calculation(
     Intermediate images are generated by linear interpolation (pymatgen).
 
     Parameters:
-    - initial_formula / initial_cif_url / initial_task_id: initial structure (choose one)
-    - final_formula / final_cif_url / final_task_id: final structure (choose one)
+    - initial_cif_url / initial_task_id: initial structure (choose one)
+    - final_cif_url / final_task_id: final structure (choose one)
       Tip: use optimized task IDs for best results — ensures well-relaxed endpoints
     - n_images (optional): number of intermediate images excluding endpoints, default 5 (range 2-20)
       More images = smoother MEP but higher cost. 5-8 is typical.
-    - spacegroup / max_energy_above_hull / stable_only / selection_mode: structure search filters
     - kpoint_density (optional): K-point density, default 30.0
     - custom_incar (optional): override INCAR parameters, e.g. {"SPRING": -10, "EDIFFG": -0.03}
 
@@ -682,17 +594,8 @@ async def submit_neb_calculation(
 
 @mcp.tool()
 async def submit_phonon_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     kpoint_density: Optional[float] = None,
     displacement: Optional[float] = None,
     custom_incar: Optional[Dict[str, Any]] = None,
@@ -710,10 +613,8 @@ async def submit_phonon_calculation(
     EDIFF=1E-8 (very tight), LREAL=.FALSE., ADDGRID=.TRUE., ISMEAR=0, SIGMA=0.01.
 
     Parameters:
-    - formula (optional): Chemical formula, choose one among formula, cif_url, scf_task_id
-    - cif_url (optional): URL of CIF file
+    - cif_url (optional): URL of structure file
     - scf_task_id (optional): Completed SCF/optimization task ID (reuses POSCAR+POTCAR)
-    - spacegroup / max_energy_above_hull / min/max_band_gap / max/min_nsites / stable_only: filters
     - kpoint_density (optional): K-point density, default 30.0
     - displacement (optional): finite displacement step in Å, default 0.015
       Smaller = more accurate but more noise; 0.01-0.02 is typical
@@ -724,7 +625,7 @@ async def submit_phonon_calculation(
       n_modes, n_imaginary, dynamically_stable, max_imaginary_freq_cm1, max_real_freq_cm1
 
     Examples:
-    submit_phonon_calculation(formula="Si")
+    submit_phonon_calculation(cif_url="https://example.com/structure.cif")
     submit_phonon_calculation(scf_task_id="scf_001", displacement=0.01)
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
@@ -798,20 +699,11 @@ async def analyze_phonon_results(
 
 @mcp.tool()
 async def submit_custom_calculation(
-    formula: Optional[str] = None,
     cif_url: Optional[str] = None,
     from_task_id: Optional[str] = None,
     incar: Optional[Dict[str, Any]] = None,
     kpoint_density: Optional[float] = None,
     kpoint_mode: Optional[str] = None,
-    spacegroup: Optional[str] = None,
-    max_energy_above_hull: Optional[float] = None,
-    min_band_gap: Optional[float] = None,
-    max_band_gap: Optional[float] = None,
-    max_nsites: Optional[int] = None,
-    min_nsites: Optional[int] = None,
-    stable_only: Optional[bool] = None,
-    selection_mode: Optional[str] = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -852,7 +744,7 @@ async def submit_custom_calculation(
              "IBRION": -1, "ISYM": -1, "EDIFF": 1e-6}
 
     Parameters:
-    - formula / cif_url / from_task_id: structure source (exactly one required).
+    - cif_url / from_task_id: structure source (exactly one required).
       `from_task_id` reuses CONTCAR (or POSCAR) from any completed task.
     - incar: dict of VASP INCAR parameters. All keys are accepted — no blacklist.
       SYSTEM defaults to "CUSTOM" if not provided.
@@ -864,20 +756,11 @@ async def submit_custom_calculation(
     user_id = get_user_id(ctx)
     payload = CustomCalcInput(
         user_id=user_id,
-        formula=formula,
         cif_url=cif_url,  # type: ignore
         from_task_id=from_task_id,
         incar=incar or {},
         kpoint_density=kpoint_density if kpoint_density is not None else 30.0,
         kpoint_mode=kpoint_mode or "mesh",
-        spacegroup=spacegroup,
-        max_energy_above_hull=max_energy_above_hull,
-        min_band_gap=min_band_gap,
-        max_band_gap=max_band_gap,
-        max_nsites=max_nsites,
-        min_nsites=min_nsites,
-        stable_only=stable_only if stable_only is not None else True,
-        selection_mode=selection_mode or "auto",
     ).model_dump(mode="json", exclude_none=True)
     return await client.submit_custom_calculation(payload)
 

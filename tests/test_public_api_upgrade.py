@@ -46,8 +46,8 @@ def _create_task(db_session, **overrides):
         analysis_status="completed",
         tenant_id="tenant-a",
         queue_name="default",
-        params={"formula": "Li2O"},
-        input_snapshot={"formula": "Li2O"},
+        params={"cif_url": "https://structures.example.com/Li2O.cif"},
+        input_snapshot={"cif_url": "https://structures.example.com/Li2O.cif"},
         result_summary={},
     )
     defaults.update(overrides)
@@ -64,7 +64,7 @@ def test_submit_task_only_creates_db_record_and_returns_task_id(db_session):
         app,
         "POST",
         "/vasp/scf-calculation",
-        json={"user_id": "test_user", "formula": "Li2O"},
+        json={"user_id": "test_user", "cif_url": "https://structures.example.com/Li2O.cif"},
     )
 
     assert response.status_code == 200
@@ -76,6 +76,19 @@ def test_submit_task_only_creates_db_record_and_returns_task_id(db_session):
     assert task.status == "queued"
     attempts = db_session.query(ExecutionAttempt).filter_by(task_id=payload["task_id"]).all()
     assert attempts == []
+
+
+def test_submit_task_rejects_formula_input(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/scf-calculation",
+        json={"user_id": "test_user", "formula": "Li2O"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_status_endpoint_hydrates_artifact_urls_from_db_metadata(task_manager, db_session):
@@ -106,7 +119,11 @@ def test_mcp_client_still_works_with_public_api_shape():
 
     client = LocalVaspAPIClient(app)
 
-    submit_payload = asyncio.run(client.submit_structure_optimization({"user_id": "test_user", "formula": "Li2O"}))
+    submit_payload = asyncio.run(
+        client.submit_structure_optimization(
+            {"user_id": "test_user", "cif_url": "https://structures.example.com/Li2O.cif"}
+        )
+    )
     status_payload = asyncio.run(client.get_task_status(submit_payload["task_id"], "test_user"))
 
     assert set(submit_payload) >= {"task_id", "status", "message"}

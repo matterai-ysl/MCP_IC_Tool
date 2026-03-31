@@ -82,7 +82,6 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
     # 只取影响计算结果的关键参数，忽略 user_id 等
     key_fields = {
         "task_type": task_type,
-        "formula": params.get("formula"),
         "cif_url": params.get("cif_url"),
         "optimized_task_id": params.get("optimized_task_id"),
         "scf_task_id": params.get("scf_task_id"),
@@ -97,10 +96,8 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
         # NEB
         "initial_task_id": params.get("initial_task_id"),
         "initial_cif_url": params.get("initial_cif_url"),
-        "initial_formula": params.get("initial_formula"),
         "final_task_id": params.get("final_task_id"),
         "final_cif_url": params.get("final_cif_url"),
-        "final_formula": params.get("final_formula"),
         "n_images": params.get("n_images"),
         # Phonon
         "displacement": params.get("displacement"),
