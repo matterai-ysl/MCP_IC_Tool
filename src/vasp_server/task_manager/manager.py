@@ -409,7 +409,17 @@ class TaskManager:
         db: Session = SessionLocal()
         try:
             task = self._validate_lease(db, task_id, lease_token, worker_id)
-            should_requeue = task.retry_count < task.max_retries
+            if str(task.status) == "cancel_requested":
+                task.status = "canceled"  # type: ignore
+                task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                db.add(task)
+                db.commit()
+                return
+
+            should_requeue = _is_retryable_error(error_message) and task.retry_count < task.max_retries
             task.error_message = error_message  # type: ignore
 
             if should_requeue:
@@ -455,6 +465,40 @@ class TaskManager:
 
             db.commit()
             return len(expired_tasks)
+        finally:
+            db.close()
+
+    def mark_orphaned_running_tasks(self) -> int:
+        from ..settings import settings as _settings
+
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            heartbeat_deadline = now - timedelta(seconds=_settings.worker_heartbeat_timeout_seconds)
+            orphaned_tasks = list(
+                db.query(Task)
+                .filter(
+                    Task.status.in_(["running", "uploading", "analyzing"]),
+                    Task.heartbeat_at.is_not(None),
+                    Task.heartbeat_at <= heartbeat_deadline,
+                )
+                .all()
+            )
+
+            for task in orphaned_tasks:
+                if task.retry_count < task.max_retries:
+                    task.retry_count = (task.retry_count or 0) + 1  # type: ignore
+                    task.status = "queued"  # type: ignore
+                else:
+                    task.status = "failed"  # type: ignore
+                    task.finalized_at = now  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                db.add(task)
+
+            db.commit()
+            return len(orphaned_tasks)
         finally:
             db.close()
 
