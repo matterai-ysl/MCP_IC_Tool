@@ -1075,6 +1075,39 @@ class TaskManager:
         finally:
             db.close()
 
+    def get_task_artifact_manifest(self, task_id: str) -> List[Dict[str, Any]]:
+        """构造可供下游任务复用的产物清单。"""
+        manifest: List[Dict[str, Any]] = []
+        for artifact in self.get_task_artifacts(task_id):
+            storage_key = getattr(artifact, "storage_key", None)
+            object_key = getattr(artifact, "object_key", None)
+            filename = os.path.basename(str(object_key or storage_key or getattr(artifact, "artifact_type", "artifact")))
+            content_type = getattr(artifact, "content_type", None) or getattr(artifact, "mime_type", None)
+            item: Dict[str, Any] = {
+                "id": str(getattr(artifact, "id")),
+                "artifact_type": str(getattr(artifact, "artifact_type")),
+                "filename": filename,
+                "storage_backend": getattr(artifact, "storage_backend", None),
+                "storage_key": storage_key,
+                "bucket": getattr(artifact, "bucket", None),
+                "object_key": object_key,
+                "content_type": content_type,
+                "size_bytes": getattr(artifact, "size_bytes", None),
+                "etag": getattr(artifact, "etag", None),
+                "sha256": getattr(artifact, "sha256", None),
+            }
+
+            if getattr(artifact, "storage_backend", None) == "local" and storage_key:
+                item["local_path"] = str(storage_key)
+
+            download_url = self.get_artifact_download_url(artifact)
+            if download_url:
+                item["download_url"] = download_url
+
+            manifest.append({key: value for key, value in item.items() if value is not None})
+
+        return manifest
+
     def get_analysis_run(self, task_id: str) -> Optional[SimpleNamespace]:
         """获取任务最新的分析记录"""
         db: Session = SessionLocal()

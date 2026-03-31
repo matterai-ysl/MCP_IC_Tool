@@ -114,6 +114,43 @@ def test_status_endpoint_hydrates_artifact_urls_from_db_metadata(task_manager, d
     assert payload["artifacts"][0]["download_url"].startswith("https://")
 
 
+def test_submit_with_upstream_task_id_injects_artifact_manifest(task_manager, db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    upstream_task_id = _create_task(
+        db_session,
+        task_type="structure_optimization",
+        status="completed",
+        analysis_status="completed",
+    )
+    task_manager.register_artifact(
+        task_id=upstream_task_id,
+        artifact_type="contcar",
+        owner_type="execution",
+        owner_id="attempt-1",
+        filename="CONTCAR",
+        content_type="text/plain",
+        size_bytes=128.0,
+        attempt_no=1,
+    )
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/scf-calculation",
+        json={"user_id": "test_user", "optimized_task_id": upstream_task_id},
+    )
+
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+    task = db_session.get(Task, task_id)
+    assert task is not None
+    manifest = (task.params or {}).get("upstream_artifact_manifest", [])
+    assert manifest
+    assert manifest[0]["artifact_type"] == "contcar"
+    assert manifest[0]["download_url"].startswith("https://")
+
+
 def test_mcp_client_still_works_with_public_api_shape():
     from src.vasp_server.vasp_server_api import app
 

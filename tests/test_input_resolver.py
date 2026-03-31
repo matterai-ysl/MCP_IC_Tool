@@ -53,6 +53,66 @@ def test_dos_resolves_charge_and_wavefunction_from_manifest(tmp_path):
     assert (work_dir / "WAVECAR").read_text(encoding="utf-8") == "wavecar"
 
 
+def test_band_structure_uses_upstream_artifact_manifest_instead_of_local_task_dir(tmp_path):
+    worker = VaspWorker(user_id="u1", base_work_dir=str(tmp_path / "workspace"))
+    work_dir = worker.base_work_dir / "band-task"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = tmp_path / "upstream-band"
+    poscar = _write_file(source_dir / "POSCAR", "band-poscar")
+    potcar = _write_file(source_dir / "POTCAR", "band-potcar")
+    chgcar = _write_file(source_dir / "CHGCAR", "band-chgcar")
+
+    copied = asyncio.run(
+        worker._prepare_band_structure_files(
+            work_dir,
+            {
+                "scf_task_id": "scf-task",
+                "upstream_artifact_manifest": [
+                    {"artifact_type": "poscar", "local_path": str(poscar), "filename": "POSCAR"},
+                    {"artifact_type": "potcar", "local_path": str(potcar), "filename": "POTCAR"},
+                    {"artifact_type": "chgcar", "local_path": str(chgcar), "filename": "CHGCAR"},
+                ],
+            },
+        )
+    )
+
+    assert set(copied) >= {"POSCAR", "POTCAR", "CHGCAR"}
+    assert (work_dir / "POSCAR").read_text(encoding="utf-8") == "band-poscar"
+    assert (work_dir / "POTCAR").read_text(encoding="utf-8") == "band-potcar"
+    assert (work_dir / "CHGCAR").read_text(encoding="utf-8") == "band-chgcar"
+
+
+def test_scf_can_download_upstream_artifact_from_download_url(tmp_path, monkeypatch):
+    resolver = UpstreamInputResolver()
+    work_dir = tmp_path / "scf-task"
+
+    class _Response:
+        content = b"downloaded-contcar"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, timeout=60):
+        assert url == "https://artifacts.example.com/contcar"
+        return _Response()
+
+    monkeypatch.setattr("src.vasp_server.input_resolver.requests.get", fake_get)
+
+    copied = resolver.resolve_for_scf(
+        [
+            {
+                "artifact_type": "contcar",
+                "download_url": "https://artifacts.example.com/contcar",
+                "filename": "CONTCAR",
+            }
+        ],
+        work_dir,
+    )
+
+    assert copied["POSCAR"].endswith("POSCAR")
+    assert (work_dir / "POSCAR").read_text(encoding="utf-8") == "downloaded-contcar"
+
+
 def test_formula_input_is_no_longer_supported_for_scf(tmp_path):
     worker = VaspWorker(user_id="u1", base_work_dir=str(tmp_path / "workspace"))
     work_dir = worker.base_work_dir / "scf-task"

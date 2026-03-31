@@ -445,6 +445,13 @@ class VaspWorker:
     
     async def _prepare_band_structure_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为能带结构计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_band_structure(upstream_artifacts, work_dir)
 
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
@@ -492,6 +499,13 @@ class VaspWorker:
 
     async def _prepare_md_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为分子动力学计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_md(upstream_artifacts, work_dir)
         
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
@@ -2241,13 +2255,23 @@ echo "VASP计算完成"
         """获取 NEB 初始结构和终态结构，返回 (initial_poscar_path, final_poscar_path)。"""
         from .base import generate_potcar
 
-        async def _get_poscar(task_id_key: str, cif_url_key: str, dest_name: str) -> str:
+        async def _get_poscar(task_id_key: str, cif_url_key: str, manifest_key: str, dest_name: str) -> str:
             """从 task_id / cif_url 中获取 POSCAR，保存为 dest_name。"""
             task_id_val = params.get(task_id_key)
             cif_url_val = params.get(cif_url_key)
             dest = work_dir / dest_name
 
             if task_id_val:
+                upstream_artifacts = params.get(manifest_key) or []
+                if upstream_artifacts:
+                    resolved = self.input_resolver.resolve_single_structure(
+                        upstream_artifacts,
+                        work_dir,
+                        dest_name=dest_name,
+                    )
+                    logger.info("NEB 端点结构来自上游产物清单: %s", task_id_val)
+                    return resolved[dest_name]
+
                 src_dir = self.base_work_dir / task_id_val
                 # 优先使用 CONTCAR（优化后结构），回退 POSCAR
                 for fname in ("CONTCAR", "POSCAR"):
@@ -2274,8 +2298,18 @@ echo "VASP计算完成"
             shutil.rmtree(str(tmp_dir), ignore_errors=True)
             return str(dest)
 
-        initial_poscar = await _get_poscar("initial_task_id", "initial_cif_url", "POSCAR_initial")
-        final_poscar = await _get_poscar("final_task_id", "final_cif_url", "POSCAR_final")
+        initial_poscar = await _get_poscar(
+            "initial_task_id",
+            "initial_cif_url",
+            "initial_upstream_artifact_manifest",
+            "POSCAR_initial",
+        )
+        final_poscar = await _get_poscar(
+            "final_task_id",
+            "final_cif_url",
+            "final_upstream_artifact_manifest",
+            "POSCAR_final",
+        )
         return initial_poscar, final_poscar
 
     async def _generate_neb_images(self, work_dir: Path, initial_poscar: str, final_poscar: str, params: Dict[str, Any]):
@@ -2429,6 +2463,15 @@ LREAL = Auto
     async def _prepare_phonon_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None):
         """为声子计算准备 POSCAR 和 POTCAR。"""
         from .base import generate_potcar
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取声子输入文件...")
+            self.input_resolver.resolve_for_phonon(upstream_artifacts, work_dir)
+            if not (work_dir / "POTCAR").exists():
+                generate_potcar(str(work_dir))
+            return
 
         if params.get('scf_task_id'):
             if progress_callback:
@@ -2577,6 +2620,16 @@ GGA = PE
 
     async def _prepare_custom_structure(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> None:
         """为自定义计算准备 POSCAR（优先 CONTCAR）"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('from_task_id') and upstream_artifacts:
+            resolved = self.input_resolver.resolve_for_custom(upstream_artifacts, work_dir)
+            logger.info("从上游产物清单复制 POSCAR（来自任务 %s）", params['from_task_id'])
+            if progress_callback:
+                await progress_callback(10, "从上游产物清单获取结构文件...")
+            if resolved.get("POSCAR"):
+                return
+
         if params.get('from_task_id'):
             src_dir = self.base_work_dir / params['from_task_id']
             for fname in ("CONTCAR", "POSCAR"):

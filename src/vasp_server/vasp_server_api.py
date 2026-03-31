@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import Any, Dict, List
 import os
 import uvicorn
 import logging
@@ -146,6 +146,27 @@ def _record_task_submitted(task_type: str):
         vasp_tasks_queued.inc()
 
 
+def _require_completed_upstream_task(task_id: str, user_id: str, task_label: str):
+    task = task_manager.get_task(task_id, user_id)
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{task_label} {task_id} 未找到或无权限访问",
+        )
+    if str(task.status) != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_label} {task_id} 尚未完成",
+        )
+    return task
+
+
+def _attach_upstream_artifact_manifest(task_params: Dict[str, Any], source_task_id: str, param_name: str = "upstream_artifact_manifest") -> None:
+    manifest = task_manager.get_task_artifact_manifest(source_task_id)
+    if manifest:
+        task_params[param_name] = manifest
+
+
 @app.post("/vasp/structure-optimization", response_model=StructOptResponse)
 async def submit_structure_optimization(request: StructOptRequest):
     """提交结构优化任务。"""
@@ -188,17 +209,11 @@ async def submit_scf_calculation(request: SCFRequest):
         
         # 如果基于优化任务，验证任务存在性
         if request.optimized_task_id:
-            opt_task = task_manager.get_task(request.optimized_task_id, request.user_id)
-            if not opt_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"结构优化任务 {request.optimized_task_id} 未找到或无权限访问"
-                )
-            if str(opt_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"结构优化任务 {request.optimized_task_id} 尚未完成"
-                )
+            _require_completed_upstream_task(
+                request.optimized_task_id,
+                request.user_id,
+                "结构优化任务",
+            )
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
@@ -206,6 +221,8 @@ async def submit_scf_calculation(request: SCFRequest):
             "kpoint_density": request.kpoint_density,
             "precision": request.precision,
         }
+        if request.optimized_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.optimized_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="scf_calculation",
@@ -240,17 +257,11 @@ async def submit_dos_calculation(request: DOSRequest):
         
         # 如果基于自洽场任务，验证任务存在性
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
@@ -259,6 +270,8 @@ async def submit_dos_calculation(request: DOSRequest):
             "kpoint_multiplier": request.kpoint_multiplier,
             "precision": request.precision,
         }
+        if request.scf_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="dos_calculation",
@@ -297,17 +310,11 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
             )
 
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
 
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
@@ -316,6 +323,8 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
             "line_density": request.line_density,
             "precision": request.precision,
         }
+        if request.scf_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -354,17 +363,11 @@ async def submit_md_calculation(request: MDRequest):
         
         # 如果基于自洽场任务，验证任务存在性
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
         
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
@@ -375,6 +378,8 @@ async def submit_md_calculation(request: MDRequest):
             "ensemble": request.ensemble,
             "precision": request.precision,
         }
+        if request.scf_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="md_calculation",
@@ -404,6 +409,19 @@ async def submit_md_calculation(request: MDRequest):
 async def submit_neb_calculation(request: NEBRequest):
     """提交 NEB（过渡态）计算任务"""
     try:
+        if request.initial_task_id:
+            _require_completed_upstream_task(
+                request.initial_task_id,
+                request.user_id,
+                "初始态任务",
+            )
+        if request.final_task_id:
+            _require_completed_upstream_task(
+                request.final_task_id,
+                request.user_id,
+                "终态任务",
+            )
+
         task_params = {
             "initial_cif_url": str(request.initial_cif_url) if request.initial_cif_url else None,
             "initial_task_id": request.initial_task_id,
@@ -414,6 +432,18 @@ async def submit_neb_calculation(request: NEBRequest):
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
+        if request.initial_task_id:
+            _attach_upstream_artifact_manifest(
+                task_params,
+                request.initial_task_id,
+                param_name="initial_upstream_artifact_manifest",
+            )
+        if request.final_task_id:
+            _attach_upstream_artifact_manifest(
+                task_params,
+                request.final_task_id,
+                param_name="final_upstream_artifact_manifest",
+            )
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -436,6 +466,12 @@ async def submit_neb_calculation(request: NEBRequest):
 async def submit_phonon_calculation(request: PhononRequest):
     """提交声子计算任务（IBRION=6，Gamma 点有限位移法）"""
     try:
+        if request.scf_task_id:
+            _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "上游任务",
+            )
         task_params = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
@@ -444,6 +480,8 @@ async def submit_phonon_calculation(request: PhononRequest):
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
+        if request.scf_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.scf_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -466,6 +504,12 @@ async def submit_phonon_calculation(request: PhononRequest):
 async def submit_custom_calculation(request: CustomCalcRequest):
     """提交通用自定义计算任务 — 用户完全控制INCAR，适合HSE06、DFPT介电、ELF、Wannier等长尾需求"""
     try:
+        if request.from_task_id:
+            _require_completed_upstream_task(
+                request.from_task_id,
+                request.user_id,
+                "上游任务",
+            )
         task_params: Dict[str, Any] = {
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "from_task_id": request.from_task_id,
@@ -473,6 +517,8 @@ async def submit_custom_calculation(request: CustomCalcRequest):
             "kpoint_density": request.kpoint_density,
             "kpoint_mode": request.kpoint_mode,
         }
+        if request.from_task_id:
+            _attach_upstream_artifact_manifest(task_params, request.from_task_id)
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,

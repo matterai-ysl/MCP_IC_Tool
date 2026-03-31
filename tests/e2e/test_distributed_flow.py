@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx
 
 from src.vasp_server.hpc_pull_worker import PullWorker
+from src.vasp_server.task_manager.models import Task
 
 
 def _request(app, method: str, url: str, **kwargs):
@@ -132,23 +133,37 @@ def test_end_to_end_structure_optimization_flow(tmp_path):
     assert payload["artifacts"][0]["download_url"].startswith("https://")
 
 
-def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_path):
-    from src.vasp_server.vasp_server_api import task_manager
+def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_path, db_session):
+    from src.vasp_server.vasp_server_api import app, task_manager
 
-    contcar = tmp_path / "object-store" / "CONTCAR"
-    contcar.parent.mkdir(parents=True, exist_ok=True)
-    contcar.write_text("upstream-structure", encoding="utf-8")
-
-    scf_task_id = task_manager.submit_task(
+    upstream_task_id = task_manager.submit_task(
         user_id="test_user",
-        task_type="scf_calculation",
-        params={
-            "optimized_task_id": "opt-task",
-            "upstream_artifact_manifest": [
-                {"artifact_type": "contcar", "local_path": str(contcar), "filename": "CONTCAR"},
-            ],
-        },
+        task_type="structure_optimization",
+        params={"cif_url": "https://structures.example.com/Li2O.cif"},
     )
+    task = db_session.get(Task, upstream_task_id)
+    task.status = "completed"
+    task.analysis_status = "completed"
+    db_session.add(task)
+    db_session.commit()
+    task_manager.register_artifact(
+        task_id=upstream_task_id,
+        artifact_type="contcar",
+        owner_type="execution",
+        owner_id="attempt-1",
+        filename="CONTCAR",
+        content_type="text/plain",
+        size_bytes=128.0,
+        attempt_no=1,
+    )
+    submit_response = _request(
+        app,
+        "POST",
+        "/vasp/scf-calculation",
+        json={"user_id": "test_user", "optimized_task_id": upstream_task_id},
+    )
+    assert submit_response.status_code == 200
+
     scf_worker = FakeSCFWorker()
     PullWorker(
         control_plane_client=DirectControlPlaneClient(task_manager),
@@ -161,7 +176,7 @@ def test_end_to_end_scf_reuses_upstream_manifest_and_cancel_running_task(tmp_pat
     cancel_task_id = task_manager.submit_task(
         user_id="test_user",
         task_type="structure_optimization",
-        params={"cif_url": "https://structures.example.com/Li2O.cif"},
+        params={"cif_url": "https://structures.example.com/Li2O-cancel.cif"},
     )
     PullWorker(
         control_plane_client=DirectControlPlaneClient(
