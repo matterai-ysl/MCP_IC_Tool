@@ -9,6 +9,7 @@ import logging
 import sys
 from pathlib import Path
 # Config import moved to __main__ block
+from .internal_worker_api import build_internal_worker_router
 from .schemas import (
     StructOptRequest, StructOptResponse, TaskStatusResponse,
     TaskStatus, AnalysisStatus, ArtifactInfo,
@@ -95,6 +96,7 @@ async def _startup_init():
 
 # 创建全局任务管理器实例
 task_manager = TaskManager()
+app.include_router(build_internal_worker_router(task_manager))
 
 @app.get("/")
 async def root():

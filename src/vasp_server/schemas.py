@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import Optional, Literal, Union, Dict, Any, List
 from enum import Enum
 from urllib.parse import urlparse
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,61 @@ class TaskStatusResponse(BaseModel):
     result_data: Optional[dict] = Field(None, description="详细的计算结果数据")
     created_at: str
     updated_at: str
+
+
+class WorkerRegisterRequest(BaseModel):
+    worker_id: str
+    queue_name: str = "default"
+
+
+class WorkerRegisterResponse(BaseModel):
+    worker_id: str
+    queue_name: str
+    poll_interval_seconds: int
+
+
+class WorkerClaimRequest(BaseModel):
+    worker_id: str
+    queue_name: str = "default"
+
+
+class WorkerClaimResponse(BaseModel):
+    task_id: str
+    status: TaskStatus
+    worker_id: str
+    lease_token: str
+    lease_expires_at: datetime
+    task_type: str
+    queue_name: str
+    params: Optional[dict] = None
+    upstream_artifact_manifest: List[dict] = Field(default_factory=list)
+
+
+class WorkerLeaseRequest(BaseModel):
+    worker_id: str
+    lease_token: str
+
+
+class WorkerHeartbeatResponse(BaseModel):
+    task_id: str
+    status: TaskStatus
+    lease_expires_at: datetime
+    cancel_requested: bool = False
+
+
+class WorkerTaskStatusResponse(BaseModel):
+    task_id: str
+    status: TaskStatus
+
+
+class WorkerCompleteRequest(WorkerLeaseRequest):
+    result_data: Optional[dict] = None
+    artifact_manifest: List[dict] = Field(default_factory=list)
+
+
+class WorkerFailRequest(WorkerLeaseRequest):
+    error_message: str
+    failure_code: Optional[str] = None
 
 class StructOptResult(BaseModel):
     """结构优化结果模型"""
