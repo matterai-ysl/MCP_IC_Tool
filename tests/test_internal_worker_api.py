@@ -141,3 +141,42 @@ def test_complete_and_fail_endpoints_reject_invalid_lease_tokens(app, db_session
 
     assert complete_resp.status_code == 409
     assert fail_resp.status_code == 409
+
+
+def test_complete_endpoint_is_idempotent_for_replayed_success(app, db_session):
+    task_id = _create_task(db_session)
+    claim_resp = _request(
+        app,
+        "POST",
+        "/internal/workers/claim",
+        json={"worker_id": "hpc-a", "queue_name": "default"},
+        headers=_worker_headers(),
+    )
+    claim_payload = claim_resp.json()
+
+    first_complete = _request(
+        app,
+        "POST",
+        f"/internal/tasks/{task_id}/complete",
+        json={
+            "worker_id": "hpc-a",
+            "lease_token": claim_payload["lease_token"],
+            "result_data": {"ok": True},
+        },
+        headers=_worker_headers(),
+    )
+    replay_complete = _request(
+        app,
+        "POST",
+        f"/internal/tasks/{task_id}/complete",
+        json={
+            "worker_id": "hpc-a",
+            "lease_token": claim_payload["lease_token"],
+            "result_data": {"ok": True},
+        },
+        headers=_worker_headers(),
+    )
+
+    assert first_complete.status_code == 200
+    assert replay_complete.status_code == 200
+    assert replay_complete.json()["status"] == "completed"

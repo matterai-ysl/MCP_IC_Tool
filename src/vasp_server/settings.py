@@ -53,6 +53,10 @@ class VaspServerSettings(BaseSettings):
     task_lease_seconds: int = 300
     worker_poll_interval_seconds: int = 10
     worker_heartbeat_timeout_seconds: int = 120
+    worker_control_plane_retry_attempts: int = 8
+    worker_control_plane_final_retry_attempts: int = 20
+    worker_control_plane_retry_backoff_seconds: float = 2.0
+    worker_control_plane_retry_max_backoff_seconds: float = 30.0
 
     # ---- Notification service ----
     notification_service_base_url: Optional[str] = None
