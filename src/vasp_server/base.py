@@ -3,7 +3,11 @@ import subprocess
 import sys
 import math
 import json
-from .Config import get_kpoints_config,get_vasp_config,get_incar_templates
+import logging
+from .Config import get_kpoints_config,get_vasp_config,get_incar_template
+
+logger = logging.getLogger(__name__)
+
 # ========================
 # 工具函数
 # ========================
@@ -14,7 +18,7 @@ def run_command_background(command, work_dir=None, log_file="result.log"):
     full_log_path = os.path.join(work_dir, log_file) if work_dir else log_file
     
     try:
-        print(f"后台执行命令: {' '.join(command)}")
+        logger.debug("后台执行命令: %s", ' '.join(command))
         
         with open(full_log_path, 'w') as f:
             # 使用 Popen 而不是 run，不等待完成
@@ -42,40 +46,31 @@ def load_u_values(config_path):
         raise SystemExit(f"错误：配置文件 {config_path} 未找到")
     except json.JSONDecodeError:
         raise SystemExit(f"错误：配置文件 {config_path} 格式不正确")
-def cif_to_poscar(cif_path,work_dir='./'):
+def cif_to_poscar(cif_path, work_dir='./'):
     """将CIF转换为POSCAR（vasp5格式）"""
-    print("正在转换CIF到POSCAR...")
+    logger.info("正在转换CIF到POSCAR...")
     if not os.path.exists(cif_path):
         sys.exit("错误：未找到文件 {}".format(cif_path))
-    
-    # 获取CIF文件所在目录
-    cif_dir = os.path.dirname(os.path.abspath(cif_path))
+
     poscar_path = os.path.join(work_dir, "POSCAR")
-    
-    # 保存当前目录
-    original_dir = os.getcwd()
-    try:    
-        # 严格按照用户提供的固定命令格式
-        command = [
-            "cif2cell",
-            "-f", cif_path,
-            "-p", "vasp",
-            "-o", poscar_path,
-            "--no-reduce",
-            "--vasp-format=5",
-            "--vasp-cartesian-lattice-vectors"
-        ]
-        subprocess.run(
-                command,
-                cwd=work_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-        print("POSCAR生成成功")
-        return poscar_path
-    finally:
-        # 确保无论发生什么都恢复原始目录
-        os.chdir(original_dir)
+
+    command = [
+        "cif2cell",
+        "-f", cif_path,
+        "-p", "vasp",
+        "-o", poscar_path,
+        "--no-reduce",
+        "--vasp-format=5",
+        "--vasp-cartesian-lattice-vectors"
+    ]
+    subprocess.run(
+        command,
+        cwd=work_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    logger.info("POSCAR生成成功")
+    return poscar_path
 
 def read_poscar_elements(poscar_path="POSCAR"):
     """从POSCAR读取元素顺序"""
@@ -94,7 +89,7 @@ def generate_ldau_params(elements, u_values):
     ldauj = []
     for elem in elements:
         if elem not in u_values:
-            print(f"警告：元素 {elem} 未定义 U 值，使用 U=0.0")
+            logger.warning("元素 %s 未定义 U 值，使用 U=0.0", elem)
             u_values[elem] = 0.0
         if u_values[elem] > 0:
             ldaul.append(2)
@@ -132,7 +127,7 @@ def generate_kpoints(work_dir='./'):
             f.write("0\nGamma\n")
             f.write("%3d %3d %3d\n" % tuple(kmesh))
             f.write("0 0 0\n")
-        print(f"KPOINTS 文件已生成于 {kpoints_path}")
+        logger.info("KPOINTS 文件已生成于 %s", kpoints_path)
         return True
     except IOError:
         raise RuntimeError("无法写入 KPOINTS 文件")
@@ -169,16 +164,16 @@ def generate_potcar(work_dir='./'):
             for potcar in potcar_paths:
                 with open(potcar, 'rb') as infile:
                     outfile.write(infile.read())
-        print(f"POTCAR 文件已生成于 {potcar_path}")
+        logger.info("POTCAR 文件已生成于 %s", potcar_path)
         return True
     except IOError as e:
         raise RuntimeError(f"写入 POTCAR 文件失败: {str(e)}")
 
-def generate_incar(work_dir, calc_type):
-    """根据 calc_type 生成 INCAR 文件"""
+def generate_incar(work_dir):
+    """生成默认 INCAR 文件"""
     incar_path = os.path.join(work_dir, "INCAR")
     with open(incar_path, 'w') as f:
-        f.write(get_incar_templates()[calc_type].strip())
+        f.write(get_incar_template())
     u_values = load_u_values(get_vasp_config()["paths"]["U_VALUES_JSON"])
     elements = read_poscar_elements(os.path.join(work_dir, "POSCAR"))
     ldaul, ldauu, ldauj = generate_ldau_params(elements, u_values)
@@ -190,7 +185,7 @@ def generate_incar(work_dir, calc_type):
         f.write("LDAUL = {}\n".format(' '.join(map(str, ldaul))))
         f.write("LDAUU = {}\n".format(' '.join(map(str, ldauu))))
         f.write("LDAUJ = {}\n".format(' '.join(map(str, ldauj))))
-    print(f"INCAR 文件已生成于 {incar_path}")
+    logger.info("INCAR 文件已生成于 %s", incar_path)
     return True
 
 if __name__ == "__main__":

@@ -27,3 +27,9 @@ datasets/
 logs/
 temp/
 tmp/
+
+# Local environment/secrets
+.env
+
+# Logs
+*.log

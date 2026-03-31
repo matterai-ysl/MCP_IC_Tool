@@ -7,6 +7,7 @@ VASP 分析器包 — 从各计算类型的 VASP 输出中提取数据并生成�
     from src.vasp_server.analyzers import PyMatGenDOSAnalyzer, generate_pymatgen_dos_report
     from src.vasp_server.analyzers import VASP_MDAnalyzer, generate_md_analysis_report
     from src.vasp_server.analyzers import BandGapAnalyzer, analyze_bandgap
+    from src.vasp_server.analyzers import BandStructureAnalyzer, generate_band_structure_report
 
 DOS/MD/Bandgap 模块依赖 pymatgen 等重量级库，使用延迟导入避免启动时报错。
 """
@@ -32,6 +33,12 @@ __all__ = [
     "VASP_MDAnalyzer", "MDHTMLReportGenerator", "generate_md_analysis_report",
     # Bandgap
     "BandGapAnalyzer", "analyze_bandgap",
+    # Band Structure
+    "BandStructureAnalyzer", "BandStructureHTMLGenerator", "generate_band_structure_report",
+    # NEB
+    "NEBAnalyzer", "NEBHTMLGenerator", "generate_neb_report",
+    # Phonon
+    "PhononAnalyzer", "PhononHTMLGenerator", "generate_phonon_report",
 ]
 
 # 延迟导入映射：名称 → (子模块, 属性名)
@@ -44,6 +51,15 @@ _LAZY_IMPORTS = {
     "generate_md_analysis_report": (".md", "generate_md_analysis_report"),
     "BandGapAnalyzer": (".bandgap", "BandGapAnalyzer"),
     "analyze_bandgap": (".bandgap", "analyze_bandgap"),
+    "BandStructureAnalyzer": (".band_structure", "BandStructureAnalyzer"),
+    "BandStructureHTMLGenerator": (".band_structure", "BandStructureHTMLGenerator"),
+    "generate_band_structure_report": (".band_structure", "generate_band_structure_report"),
+    "NEBAnalyzer": (".neb", "NEBAnalyzer"),
+    "NEBHTMLGenerator": (".neb", "NEBHTMLGenerator"),
+    "generate_neb_report": (".neb", "generate_neb_report"),
+    "PhononAnalyzer": (".phonon", "PhononAnalyzer"),
+    "PhononHTMLGenerator": (".phonon", "PhononHTMLGenerator"),
+    "generate_phonon_report": (".phonon", "generate_phonon_report"),
 }
 
 

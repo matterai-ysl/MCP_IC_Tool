@@ -44,6 +44,7 @@ Each task type has a dedicated analyzer module:
 - `dos_analyzer.py` – density of states
 - `md_analyzer.py` – molecular dynamics (supports multi-temperature scan via `T_*K/` subdirectories)
 - `bandgap_analyzer.py` – band gap extraction
+- `band_structure_analyzer.py` – band structure E(k) dispersion (pymatgen BSPlotter)
 
 `calc_type` parameter maps to INCAR templates defined in `Config.py`: `OXC` (oxide/sulfide), `ORC` (oxide reduction catalyst + vdW correction), `SSE`/`ECAT_OER`/`ECAT_HER` use OXC template. MD has its own separate template.
 
@@ -88,6 +89,7 @@ python debug_vasp_api.py        # debug API calls
 - `submit_structure_optimization` – structure relaxation (requires `formula` XOR `cif_url`)
 - `submit_scf_calculation` – SCF (requires one of `formula`/`cif_url`/`optimized_task_id`)
 - `submit_dos_calculation` – DOS (requires one of `formula`/`cif_url`/`scf_task_id`)
+- `submit_band_structure_calculation` – band structure E(k) (requires one of `formula`/`cif_url`/`scf_task_id`)
 - `submit_md_calculation` – MD with optional multi-temperature list (requires one of `formula`/`cif_url`/`scf_task_id`)
 - `get_task_status` / `cancel_task` / `list_user_tasks` – task management
 - `get_custom_incar_help` – returns INCAR parameter guide

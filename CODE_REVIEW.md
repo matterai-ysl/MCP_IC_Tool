@@ -24,9 +24,9 @@
 **文件：** `src/vasp_server/task_manager/database.py`, 第 6-10 行
 
 ```python
-DB_HOST = os.getenv("DB_HOST", "pgm-uf69uij17z9vh123jo.pg.rds.aliyuncs.com")
-DB_USER = os.getenv("DB_USER", "a2252222223")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Jixiaobei123")  # 明文密码
+DB_HOST = os.getenv("DB_HOST", "db.example.com")
+DB_USER = os.getenv("DB_USER", "db_user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "REDACTED")  # 明文密码（示例，勿在仓库中出现真实值）
 ```
 
 **风险：** 代码提交到 Git 仓库后，密码永久存在于历史记录中，任何能看到仓库的人均可直接获取数据库访问权限。
@@ -47,7 +47,7 @@ DB_PASSWORD = os.environ["DB_PASSWORD"]  # 不设默认值，缺失时直接报�
 **文件：** `src/vasp_server/mp.py`, 第 6 行
 
 ```python
-API_KEY = 'g8j3tc9BUugnPSzgJ2ppCaxPgEo5W8H7'
+API_KEY = 'REDACTED'
 ```
 
 **风险：** API Key 已暴露于版本控制，可被滥用，导致配额耗尽或账号封禁。

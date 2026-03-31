@@ -1,9 +1,17 @@
 import os
-import shutil
 import asyncio
+import logging
 import traceback
 from mp_api.client import MPRester
-API_KEY = 'g8j3tc9BUugnPSzgJ2ppCaxPgEo5W8H7'
+
+logger = logging.getLogger(__name__)
+
+
+def _get_mp_api_key() -> str:
+    api_key = os.getenv("MP_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing MP_API_KEY environment variable (Materials Project API key).")
+    return api_key
 
 def _sanitize_filename(text: str) -> str:
     """
@@ -21,7 +29,7 @@ def _sanitize_filename(text: str) -> str:
 async def download_cif_by_formula(formula, save_path, task_id, criteria=None, selection_mode="auto"):
     """
     异步下载指定化学式的CIF文件，支持多种筛选条件
-    
+
     Args:
         formula: 化学式，如 "LiFePO4"
         save_path: 保存路径
@@ -38,26 +46,23 @@ async def download_cif_by_formula(formula, save_path, task_id, criteria=None, se
                        - "interactive": 交互式选择
                        - "all": 下载所有匹配的材料
                        - "first": 选择第一个
-    
+
     Returns:
         str|list|None: 成功时返回保存路径或路径列表，失败时返回None
     """
-    # 保存当前工作目录
-    original_dir = os.getcwd()
-    
-    print(f"[INFO] 开始查询化学式 {formula} 的材料...")
-    print(f"[INFO] 保存路径: {save_path}")
-    print(f"[INFO] 任务ID: {task_id}")
-    print(f"[INFO] 选择模式: {selection_mode}")
-    print(f"[INFO] 使用新版 mp-api")
-    
+    logger.info("开始查询化学式 %s 的材料...", formula)
+    logger.info("保存路径: %s", save_path)
+    logger.info("任务ID: %s", task_id)
+    logger.info("选择模式: %s", selection_mode)
+    logger.info("使用新版 mp-api")
+
     try:
         # 创建保存目录
         try:
             os.makedirs(save_path, exist_ok=True)
-            print(f"[INFO] 保存目录已创建/确认: {save_path}")
+            logger.info("保存目录已创建/确认: %s", save_path)
         except OSError as e:
-            print(f"[ERROR] 创建保存目录失败: {e}")
+            logger.error("创建保存目录失败: %s", e)
             return None
         
         # 构建查询参数
@@ -66,11 +71,11 @@ async def download_cif_by_formula(formula, save_path, task_id, criteria=None, se
         # 添加用户自定义筛选条件
         if criteria:
             search_params.update(convert_criteria_to_search_params(criteria))
-            print(f"[INFO] 应用筛选条件: {criteria}")
+            logger.info("应用筛选条件: %s", criteria)
         
         try:
-            with MPRester(API_KEY) as mpr:
-                print(f"[INFO] 已连接到Materials Project API")
+            with MPRester(_get_mp_api_key()) as mpr:
+                logger.info("已连接到Materials Project API")
                 
                 # 执行查询
                 try:
@@ -81,30 +86,30 @@ async def download_cif_by_formula(formula, save_path, task_id, criteria=None, se
                                'density', 'is_stable']
                     )
                 
-                    print(f"[INFO] 查询到 {len(docs)} 个匹配的材料")
-                
+                    logger.info("查询到 %d 个匹配的材料", len(docs))
+
                 except Exception as e:
-                    print(f"[ERROR] 查询失败: {e}")
-                    print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+                    logger.error("查询失败: %s", e)
+                    logger.error("详细错误信息: %s", traceback.format_exc())
                     return None
                 
                 if not docs:
-                    print(f"[WARNING] 未找到与条件匹配的材料")
+                    logger.warning("未找到与条件匹配的材料")
                     return None
                 
                 # 显示找到的材料信息
-                print(f"\n[INFO] 找到的材料:")
+                logger.info("找到的材料:")
                 for i, doc in enumerate(docs):
                     stability = "稳定" if doc.is_stable else f"E_hull={doc.energy_above_hull:.3f}eV"  # type: ignore
-                    print(f"  {i+1}. {doc.material_id} - {doc.formula_pretty} "  # type: ignore
-                          f"(空间群: {doc.symmetry.symbol}, "  # type: ignore
-                          f"原子数: {doc.nsites}, {stability})")  # type: ignore
+                    logger.info("  %d. %s - %s (空间群: %s, 原子数: %s, %s)",
+                                i+1, doc.material_id, doc.formula_pretty,  # type: ignore
+                                doc.symmetry.symbol, doc.nsites, stability)  # type: ignore
                 
                 # 根据选择模式确定要下载的材料
                 selected_docs = await select_materials(docs, selection_mode)
                 
                 if not selected_docs:
-                    print(f"[WARNING] 没有选择任何材料下载")
+                    logger.warning("没有选择任何材料下载")
                     return None
                 
                 # 下载选中的材料
@@ -123,22 +128,14 @@ async def download_cif_by_formula(formula, save_path, task_id, criteria=None, se
                     return None
                     
         except Exception as e:
-            print(f"[ERROR] API连接失败: {e}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            logger.error("API连接失败: %s", e)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             return None
-            
+
     except Exception as e:
-        print(f"[ERROR] 下载过程中发生未预期的错误: {e}")
-        print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+        logger.error("下载过程中发生未预期的错误: %s", e)
+        logger.error("详细错误信息: %s", traceback.format_exc())
         return None
-        
-    finally:
-        # 确保恢复原始目录
-        try:
-            os.chdir(original_dir)
-            print(f"[INFO] 已恢复原始工作目录: {original_dir}")
-        except Exception as e:
-            print(f"[WARNING] 恢复工作目录时出错: {e}")
 
 def convert_criteria_to_search_params(criteria):
     """
@@ -204,34 +201,34 @@ async def select_materials(docs, selection_mode):
         if stable_docs:
             # 如果有稳定材料，选择形成能最低的
             selected = min(stable_docs, key=lambda x: x.formation_energy_per_atom)  # type: ignore
-            print(f"[AUTO] 自动选择稳定材料: {selected.material_id}")  # type: ignore
+            logger.info("自动选择稳定材料: %s", selected.material_id)  # type: ignore
             return [selected]
         else:
             # 没有稳定材料，选择能量最接近凸包的
             selected = min(docs, key=lambda x: x.energy_above_hull)  # type: ignore
-            print(f"[AUTO] 自动选择最接近稳定的材料: {selected.material_id} (E_hull={selected.energy_above_hull:.3f}eV)")  # type: ignore
+            logger.info("自动选择最接近稳定的材料: %s (E_hull=%.3feV)", selected.material_id, selected.energy_above_hull)  # type: ignore
             return [selected]
     
     elif selection_mode == "interactive":
         # 交互式选择（简化版，实际可以更复杂）
-        print(f"\n[INTERACTIVE] 请选择要下载的材料:")
-        print(f"输入材料编号 (1-{len(docs)})，多个用逗号分隔，或输入 'all' 下载全部:")
+        logger.info("请选择要下载的材料:")
+        logger.info("输入材料编号 (1-%d)，多个用逗号分隔，或输入 'all' 下载全部:", len(docs))
         
         # 在实际应用中，这里可以接收用户输入
         # 为了演示，这里使用自动选择逻辑
-        print(f"[INTERACTIVE] 演示模式：自动选择最稳定的材料")
+        logger.info("演示模式：自动选择最稳定的材料")
         return await select_materials(docs, "auto")
     
     elif selection_mode == "all":
-        print(f"[ALL] 选择所有 {len(docs)} 个材料")
+        logger.info("选择所有 %d 个材料", len(docs))
         return docs
     
     elif selection_mode == "first":
-        print(f"[FIRST] 选择第一个材料: {docs[0].material_id}")  # type: ignore
+        logger.info("选择第一个材料: %s", docs[0].material_id)  # type: ignore
         return [docs[0]]
     
     else:
-        print(f"[ERROR] 未知的选择模式: {selection_mode}")
+        logger.error("未知的选择模式: %s", selection_mode)
         return []
 
 async def download_single_material(mpr, doc, formula, save_path):
@@ -251,22 +248,22 @@ async def download_single_material(mpr, doc, formula, save_path):
     spacegroup = doc.symmetry.symbol  # type: ignore
     
     try:
-        print(f"[INFO] 开始下载材料 {material_id}...")
-        
+        logger.info("开始下载材料 %s...", material_id)
+
         # 获取材料结构
         structure = mpr.get_structure_by_material_id(material_id)
-        print(f"[INFO] 成功获取材料 {material_id} 的结构数据")
-        
+        logger.info("成功获取材料 %s 的结构数据", material_id)
+
         # 转换为CIF格式
         cif_data = structure.to(fmt="cif")
-        print(f"[INFO] 成功转换为CIF格式")
+        logger.info("成功转换为CIF格式")
         
         # 构建保存路径，包含材料ID和空间群信息（清洗非法字符）
         safe_formula = _sanitize_filename(formula)
         safe_spacegroup = _sanitize_filename(spacegroup)
         filename = f"{safe_formula}_{material_id}_{safe_spacegroup}.cif"
         full_save_path = os.path.join(save_path, filename)
-        print(f"[INFO] 保存路径: {full_save_path}")
+        logger.info("保存路径: %s", full_save_path)
         
         # 保存CIF文件
         with open(full_save_path, 'w', encoding='utf-8') as f:
@@ -275,15 +272,15 @@ async def download_single_material(mpr, doc, formula, save_path):
         # 验证文件
         if os.path.exists(full_save_path) and os.path.getsize(full_save_path) > 0:
             file_size = os.path.getsize(full_save_path)
-            print(f"[SUCCESS] 材料 {material_id} CIF文件保存成功，大小: {file_size} 字节")
+            logger.info("材料 %s CIF文件保存成功，大小: %d 字节", material_id, file_size)
             return full_save_path
         else:
-            print(f"[ERROR] 材料 {material_id} 文件保存失败或文件为空")
+            logger.error("材料 %s 文件保存失败或文件为空", material_id)
             return None
             
     except Exception as e:
-        print(f"[ERROR] 下载材料 {material_id} 时失败: {e}")
-        print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+        logger.error("下载材料 %s 时失败: %s", material_id, e)
+        logger.error("详细错误信息: %s", traceback.format_exc())
         return None
 
 async def download_with_criteria(formula, save_path, task_id, **kwargs):
@@ -347,12 +344,12 @@ async def batch_download_cifs(formulas, base_save_path, task_id, criteria=None, 
     Returns:
         dict: 下载结果字典 {formula: save_path_or_None}
     """
-    print(f"[INFO] 开始批量下载 {len(formulas)} 个化学式的CIF文件")
+    logger.info("开始批量下载 %d 个化学式的CIF文件", len(formulas))
     
     results = {}
     
     for i, formula in enumerate(formulas, 1):
-        print(f"\n[INFO] 处理第 {i}/{len(formulas)} 个化学式: {formula}")
+        logger.info("处理第 %d/%d 个化学式: %s", i, len(formulas), formula)
         
         try:
             # 为每个化学式创建单独的保存目录
@@ -362,24 +359,23 @@ async def batch_download_cifs(formulas, base_save_path, task_id, criteria=None, 
             results[formula] = result
             
             if result:
-                print(f"[SUCCESS] {formula} 下载成功")
+                logger.info("%s 下载成功", formula)
             else:
-                print(f"[FAILED] {formula} 下载失败")
+                logger.warning("%s 下载失败", formula)
                 
             # 添加短暂延迟，避免API请求过于频繁
             await asyncio.sleep(0.5)
             
         except Exception as e:
-            print(f"[ERROR] 处理化学式 {formula} 时发生错误: {e}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            logger.error("处理化学式 %s 时发生错误: %s", formula, e)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             results[formula] = None
     
     # 统计结果
     successful = sum(1 for result in results.values() if result is not None)
     failed = len(formulas) - successful
     
-    print(f"\n[SUMMARY] 批量下载完成:")
-    print(f"[SUMMARY] 成功: {successful}, 失败: {failed}, 总计: {len(formulas)}")
+    logger.info("批量下载完成: 成功: %d, 失败: %d, 总计: %d", successful, failed, len(formulas))
     
     return results
 
@@ -400,19 +396,19 @@ async def download_with_retry(formula, save_path, task_id, max_retries=3, retry_
     """
     for attempt in range(max_retries + 1):
         if attempt > 0:
-            print(f"[RETRY] 第 {attempt} 次重试下载 {formula}")
+            logger.info("第 %d 次重试下载 %s", attempt, formula)
             await asyncio.sleep(retry_delay)
         
         try:
             result = await download_cif_by_formula(formula, save_path, task_id, **kwargs)
             if result:
                 if attempt > 0:
-                    print(f"[SUCCESS] {formula} 在第 {attempt} 次重试后下载成功")
+                    logger.info("%s 在第 %d 次重试后下载成功", formula, attempt)
                 return result
         except Exception as e:
-            print(f"[ERROR] 第 {attempt + 1} 次尝试失败: {e}")
+            logger.error("第 %d 次尝试失败: %s", attempt + 1, e)
             if attempt == max_retries:
-                print(f"[FAILED] {formula} 在 {max_retries + 1} 次尝试后仍然失败")
+                logger.error("%s 在 %d 次尝试后仍然失败", formula, max_retries + 1)
     
     return None
 

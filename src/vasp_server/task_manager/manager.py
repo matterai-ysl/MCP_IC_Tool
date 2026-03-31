@@ -1,16 +1,49 @@
+import hashlib
+import json
+import os
 import threading
-import time
 import uuid
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect as sa_inspect
+
+from sqlalchemy import func as sa_func
 
 from .database import SessionLocal
 from .models import Task, ExecutionAttempt, AnalysisRun, Artifact
 
 logger = logging.getLogger(__name__)
+
+# 可通过环境变量调整
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "4"))
+MAX_TASK_RETRIES = int(os.getenv("MAX_TASK_RETRIES", "1"))
+
+# 可重试的错误关键词（HPC/基础设施故障）
+_RETRYABLE_KEYWORDS = [
+    "slurmstepd", "node failure", "oom", "out of memory",
+    "connection", "timeout", "resource temporarily unavailable",
+    "job killed", "segfault", "bus error",
+]
+
+
+def _orm_to_ns(obj):
+    """Convert a SQLAlchemy ORM object to a SimpleNamespace with all column values.
+
+    This must be called while the session is still open so that lazy-loaded
+    attributes are accessible.  The returned SimpleNamespace supports
+    attribute access (obj.status) and getattr() just like the original ORM
+    object, but is fully detached from the session.
+    """
+    if obj is None:
+        return None
+    mapper = sa_inspect(type(obj))
+    data = {col.key: getattr(obj, col.key) for col in mapper.column_attrs}
+    return SimpleNamespace(**data)
 
 # 支持的任务类型 → 分析类型映射
 TASK_TYPE_TO_ANALYSIS = {
@@ -18,6 +51,10 @@ TASK_TYPE_TO_ANALYSIS = {
     "scf_calculation": "scf",
     "dos_calculation": "dos",
     "md_calculation": "md",
+    "band_structure": "band_structure",
+    "neb_calculation": "neb",
+    "phonon_calculation": "phonon",
+    "custom_calculation": "custom",
 }
 
 # 支持的任务类型 → VaspWorker 方法名映射
@@ -26,25 +63,133 @@ TASK_TYPE_TO_METHOD = {
     "scf_calculation": "run_scf_calculation",
     "dos_calculation": "run_dos_calculation",
     "md_calculation": "run_md_calculation",
+    "band_structure": "run_band_structure_calculation",
+    "neb_calculation": "run_neb_calculation",
+    "phonon_calculation": "run_phonon_calculation",
+    "custom_calculation": "run_custom_calculation",
 }
 
 
+def _is_retryable_error(error_msg: str) -> bool:
+    """判断错误是否为可重试的基础设施故障"""
+    lower = error_msg.lower()
+    return any(kw in lower for kw in _RETRYABLE_KEYWORDS)
+
+
+def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
+    """基于任务类型和关键输入参数计算 SHA-256 hash，用于去重。"""
+    # 只取影响计算结果的关键参数，忽略 user_id 等
+    key_fields = {
+        "task_type": task_type,
+        "formula": params.get("formula"),
+        "cif_url": params.get("cif_url"),
+        "optimized_task_id": params.get("optimized_task_id"),
+        "scf_task_id": params.get("scf_task_id"),
+        "custom_incar": params.get("custom_incar"),
+        "kpoint_density": params.get("kpoint_density"),
+        "precision": params.get("precision"),
+        "md_steps": params.get("md_steps"),
+        "temperature": params.get("temperature"),
+        "time_step": params.get("time_step"),
+        "ensemble": params.get("ensemble"),
+        "line_density": params.get("line_density"),
+        # NEB
+        "initial_task_id": params.get("initial_task_id"),
+        "initial_cif_url": params.get("initial_cif_url"),
+        "initial_formula": params.get("initial_formula"),
+        "final_task_id": params.get("final_task_id"),
+        "final_cif_url": params.get("final_cif_url"),
+        "final_formula": params.get("final_formula"),
+        "n_images": params.get("n_images"),
+        # Phonon
+        "displacement": params.get("displacement"),
+        # Custom
+        "from_task_id": params.get("from_task_id"),
+        "incar": params.get("incar"),
+        "kpoint_mode": params.get("kpoint_mode"),
+    }
+    # 去掉 None 值，保证 hash 稳定
+    filtered = {k: v for k, v in key_fields.items() if v is not None}
+    canonical = json.dumps(filtered, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 class TaskManager:
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int = MAX_CONCURRENT_TASKS) -> None:
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="vasp-worker"
+        )
 
     # ------------------------------------------------------------------ #
     #  提交任务
     # ------------------------------------------------------------------ #
     def submit_task(self, user_id: str, task_type: str, params: Optional[Dict[str, Any]]) -> str:
-        task_id = uuid.uuid4().hex
-        cancel_event = threading.Event()
-        with self._lock:
-            self._cancel_flags[task_id] = cancel_event
+        params = params or {}
+        input_hash = _compute_input_hash(task_type, params)
 
+        # --- 去重：查找同用户下已完成且 input_hash 相同的任务 ---
         db: Session = SessionLocal()
         try:
+            existing = (
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.input_hash == input_hash,
+                    Task.status == "completed",
+                )
+                .order_by(Task.created_at.desc())
+                .first()
+            )
+            if existing is not None:
+                logger.info(
+                    "任务去重命中: 用户 %s 已有相同计算 %s (hash=%s)",
+                    user_id, existing.id, input_hash[:12],
+                )
+                return str(existing.id)
+
+            # --- 配额检查 ---
+            from ..settings import settings as _settings
+
+            # 1) 用户并发任务数限制
+            active_count = (
+                db.query(sa_func.count(Task.id))
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status.in_(["queued", "running", "analyzing"]),
+                )
+                .scalar()
+            ) or 0
+            if active_count >= _settings.max_user_concurrent_tasks:
+                raise Exception(
+                    f"已达到并发任务上限 ({_settings.max_user_concurrent_tasks})，"
+                    "请等待现有任务完成后再提交"
+                )
+
+            # 2) 每日任务总数限制
+            today_start = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            daily_count = (
+                db.query(sa_func.count(Task.id))
+                .filter(
+                    Task.user_id == user_id,
+                    Task.created_at >= today_start,
+                )
+                .scalar()
+            ) or 0
+            if daily_count >= _settings.max_user_total_tasks_per_day:
+                raise Exception(
+                    f"已达到每日任务上限 ({_settings.max_user_total_tasks_per_day})，"
+                    "请明天再试"
+                )
+
+            task_id = uuid.uuid4().hex
+            cancel_event = threading.Event()
+            with self._lock:
+                self._cancel_flags[task_id] = cancel_event
+
             task = Task(
                 id=task_id,
                 user_id=user_id,
@@ -52,18 +197,16 @@ class TaskManager:
                 status="queued",
                 analysis_status="pending",
                 progress=0,
-                params=params or {},
-                input_snapshot=params or {},
+                params=params,
+                input_snapshot=params,
+                input_hash=input_hash,
             )
             db.add(task)
             db.commit()
         finally:
             db.close()
 
-        worker_thread = threading.Thread(
-            target=self._run_task_worker, args=(task_id, cancel_event), daemon=True
-        )
-        worker_thread.start()
+        self._executor.submit(self._run_task_worker, task_id, cancel_event)
 
         return task_id
 
@@ -88,9 +231,10 @@ class TaskManager:
 
             # --- 创建 VaspWorker ---
             from ..vasp_worker import VaspWorker
+            from ..Config import DOWNLOAD_URL
             user_vasp_worker = VaspWorker(
                 user_id=str(task.user_id),
-                base_work_dir="/data/home/ysl9527/vasp_calculations"
+                base_work_dir=DOWNLOAD_URL
             )
 
             task_type = str(task.task_type)
@@ -98,97 +242,126 @@ class TaskManager:
             if not method_name:
                 raise Exception(f"不支持的任务类型: {task_type}")
 
-            # --- 创建 ExecutionAttempt ---
-            attempt_id = uuid.uuid4().hex
-            attempt = ExecutionAttempt(
-                id=attempt_id,
-                task_id=task_id,
-                attempt_no=1,
-                executor_type="slurm",
-                status="submitting",
-            )
-            db.add(attempt)
-            task.current_execution_attempt_id = attempt_id  # type: ignore
-            db.add(task)
-            db.commit()
+            # --- 带重试的执行循环 ---
+            max_attempts = MAX_TASK_RETRIES
+            last_error = ""
 
-            # --- 进度回调 ---
-            async def progress_callback(progress: int, message: str, pid: Optional[int] = None):
+            for attempt_no in range(1, max_attempts + 1):
                 if cancel_event.is_set():
                     raise Exception("任务已被取消")
-                task.progress = progress  # type: ignore
-                task.progress_message = message  # type: ignore
-                # 不再写到 error_message
 
-                if pid is not None:
-                    task.process_id = pid  # type: ignore
-                    # 也更新 ExecutionAttempt 的 external_job_id
-                    attempt.external_job_id = str(pid)  # type: ignore
-                    attempt.status = "running"  # type: ignore
-                    if not attempt.started_at:
-                        attempt.started_at = datetime.now(timezone.utc)  # type: ignore
-                    db.add(attempt)
-                    logger.info(f"任务 {task_id[:8]}... 作业ID: {pid}")
-
+                attempt_id = uuid.uuid4().hex
+                attempt = ExecutionAttempt(
+                    id=attempt_id,
+                    task_id=task_id,
+                    attempt_no=attempt_no,
+                    executor_type="slurm",
+                    status="submitting",
+                )
+                db.add(attempt)
+                task.current_execution_attempt_id = attempt_id  # type: ignore
+                if attempt_no > 1:
+                    task.progress = 1  # type: ignore
+                    task.progress_message = f"第 {attempt_no} 次尝试..."  # type: ignore
+                    logger.info(f"任务 {task_id[:8]}... 第 {attempt_no}/{max_attempts} 次重试")
                 db.add(task)
                 db.commit()
 
-            # --- 执行计算 ---
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                attempt.status = "submitted"  # type: ignore
-                attempt.submitted_at = datetime.now(timezone.utc)  # type: ignore
-                db.add(attempt)
-                db.commit()
+                # --- 进度回调 ---
+                async def progress_callback(progress: int, message: str, pid: Optional[int] = None):
+                    if cancel_event.is_set():
+                        raise Exception("任务已被取消")
+                    task.progress = progress  # type: ignore
+                    task.progress_message = message  # type: ignore
 
-                worker_method = getattr(user_vasp_worker, method_name)
-                result = loop.run_until_complete(
-                    worker_method(task_id, task.params or {}, progress_callback)
-                )
-            finally:
-                loop.close()
+                    if pid is not None:
+                        task.process_id = pid  # type: ignore
+                        attempt.external_job_id = str(pid)  # type: ignore
+                        attempt.status = "running"  # type: ignore
+                        if not attempt.started_at:
+                            attempt.started_at = datetime.now(timezone.utc)  # type: ignore
+                        db.add(attempt)
+                        logger.info(f"任务 {task_id[:8]}... 作业ID: {pid}")
 
-            logger.info(f"任务 {task_id[:8]}... 计算返回")
+                    db.add(task)
+                    db.commit()
 
-            # --- 判断执行结果 ---
-            # 对 MD 任务做兼容：multi-temperature 没有顶层 success 字段
-            exec_success = result.get('success', False)
-            if not exec_success and task_type == "md_calculation":
-                # MD multi-temp: 有 completed_subtasks > 0 就算成功
-                if result.get('is_multi_temperature') and result.get('completed_subtasks', 0) > 0:
-                    exec_success = True
-                # 单温度 MD: convergence=True 也算成功
-                if result.get('convergence', False):
-                    exec_success = True
+                # --- 执行计算 ---
+                exec_success = False
+                result: Dict[str, Any] = {}
+                try:
+                    loop = asyncio.new_event_loop()
+                    try:
+                        attempt.status = "submitted"  # type: ignore
+                        attempt.submitted_at = datetime.now(timezone.utc)  # type: ignore
+                        db.add(attempt)
+                        db.commit()
 
-            now = datetime.now(timezone.utc)
-            attempt.finished_at = now  # type: ignore
-            attempt.work_directory = result.get('work_directory', str(user_vasp_worker.base_work_dir / task_id))  # type: ignore
+                        worker_method = getattr(user_vasp_worker, method_name)
+                        result = loop.run_until_complete(
+                            worker_method(task_id, task.params or {}, progress_callback)
+                        )
+                    finally:
+                        loop.close()
 
+                    logger.info(f"任务 {task_id[:8]}... 计算返回 (attempt {attempt_no})")
+
+                    # --- 判断执行结果 ---
+                    exec_success = result.get('success', False)
+                    if not exec_success and task_type == "md_calculation":
+                        if result.get('convergence', False):
+                            exec_success = True
+
+                    now = datetime.now(timezone.utc)
+                    attempt.finished_at = now  # type: ignore
+                    attempt.work_directory = result.get(
+                        'work_directory', str(user_vasp_worker.base_work_dir / task_id)
+                    )  # type: ignore
+
+                    if exec_success:
+                        attempt.status = "succeeded"  # type: ignore
+                        db.add(attempt)
+                        db.commit()
+                        break  # 成功，退出重试循环
+
+                    # 执行失败
+                    last_error = result.get('error', result.get('error_message', '计算失败'))
+                    attempt.status = "runtime_failed"  # type: ignore
+                    attempt.failure_detail = last_error  # type: ignore
+                    db.add(attempt)
+                    db.commit()
+
+                except Exception as attempt_exc:
+                    last_error = str(attempt_exc)
+                    attempt.status = "runtime_failed"  # type: ignore
+                    attempt.failure_detail = last_error  # type: ignore
+                    attempt.finished_at = datetime.now(timezone.utc)  # type: ignore
+                    db.add(attempt)
+                    db.commit()
+
+                # 检查是否可重试
+                if attempt_no < max_attempts and _is_retryable_error(last_error):
+                    logger.warning(f"任务 {task_id[:8]}... 可重试错误: {last_error}")
+                    continue
+                else:
+                    break  # 不可重试或已到最大次数，退出
+
+            # --- 重试循环结束后处理最终结果 ---
             if exec_success:
-                attempt.status = "succeeded"  # type: ignore
-                db.add(attempt)
-                db.commit()
-
-                # 保存兼容字段
                 task.result_path = result.get('work_directory')  # type: ignore
                 task.result_data = result  # type: ignore
                 if result.get('process_id') and not task.process_id:
                     task.process_id = result.get('process_id')  # type: ignore
 
-                # --- 自动触发分析 ---
                 self._run_analysis(db, task, attempt, result, user_vasp_worker)
+                self._emit_completion_metrics(task_type, "completed")
             else:
-                attempt.status = "runtime_failed"  # type: ignore
-                attempt.failure_detail = result.get('error', result.get('error_message', '计算失败'))  # type: ignore
-                db.add(attempt)
-
                 task.status = "failed"  # type: ignore
-                task.error_message = result.get('error', result.get('error_message', '计算失败'))  # type: ignore
+                task.error_message = last_error  # type: ignore
                 db.add(task)
                 db.commit()
-                logger.info(f"任务 {task_id[:8]}... 执行失败")
+                logger.info(f"任务 {task_id[:8]}... 最终失败 (尝试 {attempt_no} 次)")
+                self._emit_completion_metrics(task_type, "failed")
 
         except Exception as exc:
             logger.error(f"任务 {task_id[:8]}... 异常: {exc}", exc_info=True)
@@ -202,6 +375,25 @@ class TaskManager:
             db.close()
             with self._lock:
                 self._cancel_flags.pop(task_id, None)
+
+    # ------------------------------------------------------------------ #
+    #  Prometheus 指标
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _emit_completion_metrics(task_type: str, status: str) -> None:
+        """Update Prometheus gauges/counters when a task finishes."""
+        try:
+            from prometheus_client import REGISTRY
+            # Check if metrics are registered
+            vasp_tasks_queued = REGISTRY._names_to_collectors.get("vasp_tasks_queued")
+            vasp_tasks_running = REGISTRY._names_to_collectors.get("vasp_tasks_running")
+            vasp_tasks_completed = REGISTRY._names_to_collectors.get("vasp_tasks_completed_total")
+            if vasp_tasks_queued:
+                vasp_tasks_queued.dec()
+            if vasp_tasks_completed:
+                vasp_tasks_completed.labels(task_type=task_type, status=status).inc()
+        except Exception:
+            pass  # metrics are optional
 
     # ------------------------------------------------------------------ #
     #  分析阶段
@@ -327,23 +519,56 @@ class TaskManager:
                 "band_gap": result.get("band_gap"),
                 "computation_time": result.get("computation_time"),
             }
+        elif task_type == "band_structure":
+            summary = {
+                "success": result.get("success", False),
+                "convergence": result.get("convergence", False),
+                "total_energy": result.get("total_energy") or result.get("energy"),
+                "fermi_energy": result.get("fermi_energy"),
+                "band_gap": result.get("band_gap"),
+                "is_direct": result.get("is_direct"),
+                "vbm": result.get("vbm"),
+                "cbm": result.get("cbm"),
+                "computation_time": result.get("computation_time"),
+            }
         elif task_type == "md_calculation":
-            if result.get("is_multi_temperature"):
-                summary = {
-                    "is_multi_temperature": True,
-                    "total_subtasks": result.get("total_subtasks"),
-                    "completed_subtasks": result.get("completed_subtasks"),
-                    "failed_subtasks": result.get("failed_subtasks"),
-                    "computation_time": result.get("computation_time"),
-                }
-            else:
-                summary = {
-                    "convergence": result.get("convergence", False),
-                    "final_energy": result.get("final_energy"),
-                    "average_temperature": result.get("average_temperature"),
-                    "total_md_steps": result.get("total_md_steps"),
-                    "computation_time": result.get("computation_time"),
-                }
+            summary = {
+                "convergence": result.get("convergence", False),
+                "final_energy": result.get("final_energy"),
+                "average_temperature": result.get("average_temperature"),
+                "total_md_steps": result.get("total_md_steps"),
+                "computation_time": result.get("computation_time"),
+            }
+        elif task_type == "neb_calculation":
+            summary = {
+                "success": result.get("success", False),
+                "forward_barrier_eV": result.get("forward_barrier_eV"),
+                "backward_barrier_eV": result.get("backward_barrier_eV"),
+                "reaction_energy_eV": result.get("reaction_energy_eV"),
+                "n_images": result.get("n_images"),
+                "computation_time": result.get("computation_time"),
+            }
+        elif task_type == "phonon_calculation":
+            summary = {
+                "success": result.get("success", False),
+                "n_modes": result.get("n_modes"),
+                "n_imaginary": result.get("n_imaginary"),
+                "dynamically_stable": result.get("dynamically_stable"),
+                "max_imaginary_freq_cm1": result.get("max_imaginary_freq_cm1"),
+                "max_real_freq_cm1": result.get("max_real_freq_cm1"),
+                "computation_time": result.get("computation_time"),
+            }
+        elif task_type == "custom_calculation":
+            summary = {
+                "success": result.get("success", False),
+                "convergence": result.get("convergence", False),
+                "final_energy": result.get("final_energy"),
+                "fermi_energy": result.get("fermi_energy"),
+                "n_ionic_steps": result.get("n_ionic_steps"),
+                "n_electronic_steps": result.get("n_electronic_steps"),
+                "output_files": result.get("output_files", []),
+                "computation_time": result.get("computation_time"),
+            }
         else:
             summary = {"success": result.get("success", False)}
 
@@ -362,6 +587,9 @@ class TaskManager:
             'md_analysis_report_html_path',
             'dos_analysis_report_html_path',
             'scf_analysis_report_html_path',
+            'band_structure_report_html_path',
+            'neb_report_html_path',
+            'phonon_report_html_path',
         ]:
             val = result.get(key)
             if val:
@@ -391,6 +619,8 @@ class TaskManager:
             "potcar": "POTCAR",
             "doscar": "DOSCAR",
             "xdatcar": "XDATCAR",
+            "eigenval": "EIGENVAL",
+            "procar": "PROCAR",
             "result_log": "result.log",
             "incar": "INCAR",
             "kpoints": "KPOINTS",
@@ -459,20 +689,17 @@ class TaskManager:
     # ------------------------------------------------------------------ #
     #  查询
     # ------------------------------------------------------------------ #
-    def get_task(self, task_id: str, user_id: str) -> Optional[Task]:
+    def get_task(self, task_id: str, user_id: str) -> Optional[SimpleNamespace]:
         db: Session = SessionLocal()
         try:
             task: Optional[Task] = db.get(Task, task_id)
             if task is None or str(task.user_id) != user_id:
                 return None
-            # Eagerly load all attributes while session is open
-            _ = task.id, task.status, task.result_data, task.result_summary
-            _ = task.analysis_status, task.progress_message
-            return task
+            return _orm_to_ns(task)
         finally:
             db.close()
 
-    def list_tasks(self, user_id: str) -> List[Task]:
+    def list_tasks(self, user_id: str) -> List[SimpleNamespace]:
         db: Session = SessionLocal()
         try:
             tasks = list(
@@ -481,48 +708,48 @@ class TaskManager:
                 .order_by(Task.created_at.desc())
                 .all()
             )
-            # Eagerly load attributes
-            for t in tasks:
-                _ = t.id, t.status, t.result_summary, t.analysis_status
-            return tasks
+            return [_orm_to_ns(t) for t in tasks]
         finally:
             db.close()
 
-    def get_task_artifacts(self, task_id: str) -> List[Artifact]:
+    def get_task_artifacts(self, task_id: str) -> List[SimpleNamespace]:
         """查询任务的所有 artifacts"""
         db: Session = SessionLocal()
         try:
-            return list(
+            rows = list(
                 db.query(Artifact)
                 .filter(Artifact.task_id == task_id)
                 .order_by(Artifact.created_at)
                 .all()
             )
+            return [_orm_to_ns(a) for a in rows]
         finally:
             db.close()
 
-    def get_analysis_run(self, task_id: str) -> Optional[AnalysisRun]:
+    def get_analysis_run(self, task_id: str) -> Optional[SimpleNamespace]:
         """获取任务最新的分析记录"""
         db: Session = SessionLocal()
         try:
-            return (
+            row = (
                 db.query(AnalysisRun)
                 .filter(AnalysisRun.task_id == task_id)
                 .order_by(AnalysisRun.created_at.desc())
                 .first()
             )
+            return _orm_to_ns(row)
         finally:
             db.close()
 
-    def get_execution_attempt(self, task_id: str) -> Optional[ExecutionAttempt]:
+    def get_execution_attempt(self, task_id: str) -> Optional[SimpleNamespace]:
         """获取任务最新的执行记录"""
         db: Session = SessionLocal()
         try:
-            return (
+            row = (
                 db.query(ExecutionAttempt)
                 .filter(ExecutionAttempt.task_id == task_id)
                 .order_by(ExecutionAttempt.created_at.desc())
                 .first()
             )
+            return _orm_to_ns(row)
         finally:
             db.close()

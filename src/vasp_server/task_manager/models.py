@@ -31,6 +31,7 @@ class Task(Base):
     # --- 输入快照 ---
     params = Column(JSON, nullable=True)
     input_snapshot = Column(JSON, nullable=True)
+    input_hash = Column(String, index=True, nullable=True)  # 用于计算去重
 
     # --- 结果 ---
     result_summary = Column(JSON, nullable=True)  # 来自 AnalysisRun.summary 回写

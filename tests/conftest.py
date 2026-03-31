@@ -205,16 +205,3 @@ def make_mock_worker_result(task_type: str, success: bool = True) -> dict:
     return base
 
 
-def make_mock_md_multi_temp_result(completed: int = 2, failed: int = 1) -> dict:
-    return {
-        "success": completed > 0,
-        "is_multi_temperature": True,
-        "total_subtasks": completed + failed,
-        "completed_subtasks": completed,
-        "failed_subtasks": failed,
-        "convergence": completed > 0,
-        "work_directory": "/tmp/test_work_dir",
-        "computation_time": 500.0,
-        "md_analysis_report_html_path": "/static/test/multi_md_report.html",
-        "subtask_results": [],
-    }

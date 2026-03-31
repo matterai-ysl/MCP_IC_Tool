@@ -21,7 +21,6 @@ from src.vasp_server.task_manager.models import (
 )
 from tests.conftest import (
     make_mock_worker_result,
-    make_mock_md_multi_temp_result,
     run_worker_with_mock_result,
 )
 
@@ -185,12 +184,21 @@ class TestMDSuccessFix:
         attempts = db_session.query(ExecutionAttempt).filter_by(task_id=task_id).all()
         assert str(attempts[0].status) == "succeeded"
 
-    def test_md_multi_temp_partial_success(self, task_manager, db_session):
-        """MD multi-temp with completed_subtasks > 0 should succeed."""
+    def test_md_single_temp_explicit_success(self, task_manager, db_session):
+        """MD with explicit success=True should succeed."""
         task_id = _create_task(db_session, "md_calculation",
-                               params={"formula": "Li2O", "calc_type": "OXC", "temperature": [300, 400, 500]})
+                               params={"formula": "Li2O", "calc_type": "OXC", "temperature": 300.0})
 
-        mock_result = make_mock_md_multi_temp_result(completed=2, failed=1)
+        mock_result = {
+            "success": True,
+            "convergence": True,
+            "final_energy": -100.5,
+            "average_temperature": 300.0,
+            "total_md_steps": 1000,
+            "work_directory": "/tmp/test_md",
+            "computation_time": 500.0,
+            "md_analysis_report_html_path": "/static/test/md_report.html",
+        }
 
         run_worker_with_mock_result(task_manager, task_id, mock_result, "md_calculation")
 

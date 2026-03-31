@@ -1,25 +1,35 @@
 import os
-import os
-from typing import Optional
-BASE_URL = "http://localhost:8130"
-DOWNLOAD_URL = "/data/home/ysl9527/vasp_calculations"
-MCP_PORT = 8130
-VASP_remote_run_url = "http://localhost:8140"
-VASP_remote_run_port = 8140
-static_url = "https://api.matterai.tech"
+import logging
 from pathlib import Path
 
+from .settings import settings
 
-def get_download_url(path:str):
-    return f"{static_url}/download/file/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
+logger = logging.getLogger(__name__)
 
-def get_static_url(path:str):
-    return f"{static_url}/static/{Path(path).relative_to(DOWNLOAD_URL).as_posix()}"
+BASE_URL = settings.vasp_server_base_url
+DOWNLOAD_URL = settings.vasp_work_root
+MCP_PORT = settings.mcp_port
+VASP_remote_run_url = settings.vasp_remote_run_url
+VASP_remote_run_port = settings.vasp_remote_run_port
+static_url = settings.vasp_public_base_url
 
-def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    return os.environ.get(name, default)
+
+def get_download_url(path: str) -> str:
+    p = Path(path)
+    try:
+        rel = p.relative_to(DOWNLOAD_URL).as_posix()
+    except ValueError:
+        rel = p.as_posix().lstrip("/")
+    return f"{static_url}/download/file/{rel}"
 
 
+def get_static_url(path: str) -> str:
+    p = Path(path)
+    try:
+        rel = p.relative_to(DOWNLOAD_URL).as_posix()
+    except ValueError:
+        rel = p.as_posix().lstrip("/")
+    return f"{static_url}/static/{rel}"
 
 
 
@@ -39,11 +49,11 @@ def get_vasp_config():
     # ========================
     paths_config = {
         "POSCAR_FILE": "POSCAR",
-        "VASP_PATH": "/data/app/vasp/6.3.2-intel/bin/vasp_std",
-        "PSEUDO_PATH": '/data/home/ysl9527/software/psudopotential',
-        "U_VALUES_JSON": "/data/home/ysl9527/software/u_values.json",
-        "BADER_PATH": "/data/home/ysl9527/software/bader",
-        "CHGSUM_PL_PATH": "/data/home/ysl9527/software/chgsum.pl",
+        "VASP_PATH": settings.vasp_path,
+        "PSEUDO_PATH": settings.pseudo_path,
+        "U_VALUES_JSON": settings.u_values_json,
+        "BADER_PATH": settings.bader_path,
+        "CHGSUM_PL_PATH": settings.chgsum_pl_path,
     }
     
     # ========================
@@ -65,7 +75,7 @@ def get_vasp_config():
     # INCAR 模板（集中管理）
     # ========================
     base_incars = {
-"OXC": """
+"DEFAULT": """
 # 基础控制
 SYSTEM = OPT
 PREC = High
@@ -89,43 +99,7 @@ POTIM = 0.2
 ISPIN = 2
 # 交换关联泛函
 GGA = PE
-# 并行与加速 
-LREAL = Auto
-# 输出控制
-LWAVE  = .FALSE.
-LCHARG = .FALSE.
-""",
-"ORC": """
-# 基础控制
-SYSTEM = OPT
-PREC = High
-ENCUT = 520
-ISTART = 0
-ICHARG = 2
-# 电子迭代
-EDIFF = 1E-5
-EDIFFG = -0.01
-NELM = 100
-NELMIN = 2
-ALGO = Normal
-ISMEAR = 0
-SIGMA = 0.05
-# 结构优化
-IBRION = 2
-NSW = 500
-ISIF = 3
-POTIM = 0.2
-# 自旋极化与磁矩
-ISPIN = 2
-# 交换关联泛函
-GGA = PE
-# 范德华力
-IVDW = 12
-VDW_RADIUS = 50.0
-VDW_S8 = 0.7875
-VDW_A1 = 0.4289
-VDW_A2 = 4.4407
-# 并行与加速 
+# 并行与加速
 LREAL = Auto
 # 输出控制
 LWAVE  = .FALSE.
@@ -221,26 +195,14 @@ def get_md_incar_template():
     """
     return get_vasp_config()["md_incar"]
 
-def get_incar_template(template_type="OXC"):
+def get_incar_template():
     """
-    获取指定类型的INCAR模板
-    
-    Args:
-        template_type (str): 模板类型，支持 "OXC" 或 "ORC"
-    
+    获取默认INCAR模板
+
     Returns:
         str: INCAR模板字符串
-    
-    Raises:
-        ValueError: 当模板类型不支持时抛出异常
     """
-    templates = get_incar_templates()
-    
-    if template_type not in templates:
-        available_types = list(templates.keys())
-        raise ValueError(f"不支持的INCAR模板类型: {template_type}. 可用类型: {available_types}")
-    
-    return templates[template_type].strip()
+    return get_incar_templates()["DEFAULT"].strip()
 
 # ========================
 # 向后兼容的全局变量
@@ -277,33 +239,26 @@ _init_global_vars()
 def print_config_summary():
     """打印配置摘要"""
     config = get_vasp_config()
-    
-    print("=== VASP 配置摘要 ===")
-    print(f"VASP路径: {config['paths']['VASP_PATH']}")
-    print(f"POSCAR文件: {config['paths']['POSCAR_FILE']}")
-    print(f"赝势路径: {config['paths']['PSEUDO_PATH']}")
-    print(f"U值配置: {config['paths']['U_VALUES_JSON']}")
-    print(f"K点乘积目标: {config['kpoints']['TARGET_KPOINT_PRODUCT']}")
-    print(f"可用INCAR模板: {list(config['base_incars'].keys())}")
-    print("=" * 50)
+
+    logger.info("=== VASP 配置摘要 ===")
+    logger.info("VASP路径: %s", config['paths']['VASP_PATH'])
+    logger.info("POSCAR文件: %s", config['paths']['POSCAR_FILE'])
+    logger.info("赝势路径: %s", config['paths']['PSEUDO_PATH'])
+    logger.info("U值配置: %s", config['paths']['U_VALUES_JSON'])
+    logger.info("K点乘积目标: %s", config['kpoints']['TARGET_KPOINT_PRODUCT'])
+    logger.info("可用INCAR模板: %s", list(config['base_incars'].keys()))
+    logger.info("=" * 50)
 
 if __name__ == "__main__":
-    # 测试配置函数
     print_config_summary()
-    
-    # 测试获取特定模板
+
     try:
-        oxc_template = get_incar_template("OXC")
-        print("\n=== OXC 模板预览 ===")
-        print(oxc_template[:200] + "...")
-        
-        orc_template = get_incar_template("ORC")
-        print("\n=== ORC 模板预览 ===")
-        print(orc_template[:200] + "...")
-        
+        default_template = get_incar_template()
+        print("\n=== DEFAULT 模板预览 ===")
+        print(default_template[:200] + "...")
+
         md_template = get_md_incar_template()
         print("\n=== MD 模板预览 ===")
         print(md_template[:200] + "...")
-        
     except Exception as e:
         print(f"错误: {e}")

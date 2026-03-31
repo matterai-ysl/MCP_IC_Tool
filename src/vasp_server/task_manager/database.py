@@ -1,22 +1,30 @@
-import os
-from sqlalchemy import create_engine, inspect
-from sqlalchemy.orm import sessionmaker, declarative_base
+import logging
+from sqlalchemy import create_engine, event, inspect
+from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
-# 云端数据库配置
-DB_HOST = os.getenv("DB_HOST", "pgm-uf69uij17z9vh123jo.pg.rds.aliyuncs.com")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "ADK")
-DB_USER = os.getenv("DB_USER", "a2252222223")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Jixiaobei123")
+from ..settings import settings
 
-SQLALCHEMY_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+logger = logging.getLogger(__name__)
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SQLALCHEMY_DATABASE_URL = settings.effective_database_url
+
+_engine_kwargs: dict = dict(pool_pre_ping=True, pool_recycle=300)
+
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL, **_engine_kwargs)
+
+# Enable WAL mode for SQLite to allow concurrent readers/writers.
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_wal(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+# Use scoped_session for thread-safe session management.
+SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 Base = declarative_base()
 
 
@@ -26,13 +34,13 @@ def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-    print("✅ 数据库表已初始化")
+    logger.info("数据库表已初始化")
 
 
 def check_and_init_db() -> None:
     """检查数据库表是否存在，如果不存在则自动创建"""
     try:
-        print(f"🔗 连接云端数据库: {DB_HOST}:{DB_PORT}/{DB_NAME}")
+        logger.info("Checking database schema...")
 
         # 检查表是否存在
         inspector = inspect(engine)
@@ -41,17 +49,17 @@ def check_and_init_db() -> None:
         required_tables = {'tasks', 'execution_attempts', 'analysis_runs', 'artifacts'}
         missing = required_tables - set(tables)
         if missing:
-            print(f"⚠️  缺少数据库表 {missing}，开始自动初始化...")
+            logger.warning("缺少数据库表 %s，开始自动初始化...", missing)
             init_db()
         else:
-            print("✅ 数据库表已存在")
+            logger.info("数据库表已存在")
 
     except Exception as e:
-        print(f"⚠️  数据库检查失败，尝试初始化: {e}")
+        logger.warning("数据库检查失败，尝试初始化: %s", e)
         try:
             init_db()
         except Exception as init_error:
-            print(f"❌ 数据库初始化失败: {init_error}")
+            logger.error("数据库初始化失败: %s", init_error)
             raise
 
 

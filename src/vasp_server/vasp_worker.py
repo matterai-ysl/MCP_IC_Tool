@@ -12,42 +12,20 @@ import time
 from .mp import download_with_criteria
 from .base import cif_to_poscar
 from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
-from typing import TYPE_CHECKING, Callable
-import importlib
 
 # 配置日志
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    # 仅用于类型检查，避免运行时硬依赖
-    from .MD_analyzer import generate_md_analysis_report  # type: ignore
-
-def _load_md_report_func() -> Optional[Callable[..., str]]:
-    """动态加载 MD 分析报告函数，兼容不同模块名/路径。"""
-    candidates = [
-        'src.vasp_server.MD_analyzer',
-        'src.vasp_server.md_analyzer',
-        'vasp_server.MD_analyzer',
-        'vasp_server.md_analyzer',
-        __package__ + '.MD_analyzer' if __package__ else 'MD_analyzer',
-        __package__ + '.md_analyzer' if __package__ else 'md_analyzer',
-    ]
-    for mod_name in candidates:
-        try:
-            mod = importlib.import_module(mod_name)
-            func = getattr(mod, 'generate_md_analysis_report', None)
-            if callable(func):
-                return func  # type: ignore
-        except Exception:
-            continue
-    return None
+from .analyzers.md import generate_md_analysis_report
 
 class VaspWorker:
     """VASP计算工作器"""
     
-    def __init__(self, user_id: str, base_work_dir: str = "/data/home/ysl9527/vasp_calculations"):
+    def __init__(self, user_id: str, base_work_dir: Optional[str] = None):
+        from .Config import DOWNLOAD_URL
         self.user_id = user_id
-        self.base_work_dir = Path(base_work_dir) / user_id  # 为每个用户创建独立目录
+        base = base_work_dir or DOWNLOAD_URL
+        self.base_work_dir = Path(base) / user_id  # 为每个用户创建独立目录
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
     
     async def run_structure_optimization(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
@@ -98,17 +76,15 @@ class VaspWorker:
             if progress_callback:
                 await progress_callback(100, "计算完成！")
                 
-            logger.info("=" * 50)
-            logger.info(f"📊 Final result: {final_result}")
-            logger.info("=" * 50)
+            logger.info("Final result: %s", final_result)
             return final_result
             
         except Exception as e:
             error_msg = f"结构优化计算失败: {str(e)}"
-            print(f"[ERROR] {error_msg}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            logger.error(error_msg)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             raise Exception(error_msg)
-    
+
     async def run_scf_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
         运行自洽场计算
@@ -138,25 +114,19 @@ class VaspWorker:
             if progress_callback:
                 await progress_callback(30, "生成自洽场VASP输入文件...")
             await self._generate_scf_inputs(work_dir, params)
-            print("--------------------------------")
-            print("自洽场VASP输入文件生成完成")
-            print("--------------------------------")
+            logger.info("自洽场VASP输入文件生成完成")
             # 3. 运行VASP自洽场计算
             if progress_callback:
                 await progress_callback(40, "开始VASP自洽场计算...")
             result = await self._run_vasp_calculation(work_dir, progress_callback)
-            print("--------------------------------")
-            print("VASP自洽场计算完成")
-            print("result: ", result)
-            print("--------------------------------")
+            logger.info("VASP自洽场计算完成")
+            logger.debug("result: %s", result)
             # 4. 分析自洽场结果
             if progress_callback:
                 await progress_callback(90, "分析自洽场计算结果...")
             final_result = await self._analyze_scf_results(work_dir, result)
-            print("--------------------------------")
-            print("自洽场计算结果分析完成")
-            print("final_result: ", final_result)
-            print("--------------------------------")
+            logger.info("自洽场计算结果分析完成")
+            logger.debug("final_result: %s", final_result)
             if progress_callback:
                 await progress_callback(100, "自洽场计算完成！")
                 
@@ -164,10 +134,10 @@ class VaspWorker:
             
         except Exception as e:
             error_msg = f"自洽场计算失败: {str(e)}"
-            print(f"[ERROR] {error_msg}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            logger.error(error_msg)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             raise Exception(error_msg)
-    
+
     async def run_dos_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
         运行态密度计算
@@ -224,44 +194,75 @@ class VaspWorker:
             
         except Exception as e:
             error_msg = f"态密度计算失败: {str(e)}"
-            print(f"[ERROR] {error_msg}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            logger.error(error_msg)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             raise Exception(error_msg)
-    
-    async def run_md_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+
+    async def run_band_structure_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
-        运行分子动力学计算（支持多温度扫描）
-        
+        运行能带结构计算
+
         Args:
             task_id: 任务ID
             params: 任务参数
             progress_callback: 进度回调函数
-            
+
         Returns:
             Dict: 计算结果
         """
         work_dir = self.base_work_dir / task_id
         work_dir.mkdir(parents=True, exist_ok=True)
-        
+
         try:
-            # 解析温度参数
-            temperature_param = params.get('temperature', 300.0)
-            if isinstance(temperature_param, list):
-                # 多温度MD计算
-                return await self._run_multi_temperature_md(task_id, params, temperature_param, progress_callback)
-            else:
-                # 单温度MD计算（保持原有逻辑）
-                return await self._run_single_temperature_md(task_id, params, float(temperature_param), progress_callback)
-                
+            if progress_callback:
+                await progress_callback(5, "开始能带结构计算...")
+
+            # 1. 准备文件（与DOS计算类似，需要SCF的CHGCAR）
+            bs_files = await self._prepare_band_structure_files(work_dir, params, progress_callback)
+            if not bs_files:
+                raise Exception("无法准备能带结构计算文件")
+
+            # 2. 生成能带结构计算输入文件
+            if progress_callback:
+                await progress_callback(30, "生成能带结构VASP输入文件...")
+            await self._generate_band_structure_inputs(work_dir, params, bs_files)
+
+            # 3. 运行VASP计算
+            if progress_callback:
+                await progress_callback(40, "开始VASP能带结构计算...")
+            result = await self._run_vasp_calculation(work_dir, progress_callback)
+
+            # 4. 分析能带结构结果
+            if progress_callback:
+                await progress_callback(90, "分析能带结构计算结果...")
+            final_result = await self._analyze_band_structure_results(work_dir, result)
+
+            if progress_callback:
+                await progress_callback(100, "能带结构计算完成!")
+
+            return final_result
+
         except Exception as e:
-            error_msg = f"分子动力学计算失败: {str(e)}"
-            print(f"[ERROR] {error_msg}")
-            print(f"[ERROR] 详细错误信息: {traceback.format_exc()}")
+            error_msg = f"能带结构计算失败: {str(e)}"
+            logger.error(error_msg)
+            logger.error("详细错误信息: %s", traceback.format_exc())
             raise Exception(error_msg)
-    
-    async def _run_single_temperature_md(self, task_id: str, params: Dict[str, Any], temperature: float, progress_callback=None) -> Dict[str, Any]:
-        """运行单温度MD计算（原有逻辑）"""
+
+    async def run_md_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """
+        运行单温度分子动力学计算
+
+        Args:
+            task_id: 任务ID
+            params: 任务参数（temperature 为单个 float）
+            progress_callback: 进度回调函数
+
+        Returns:
+            Dict: 计算结果
+        """
         work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        temperature = float(params.get('temperature', 300.0))
         
         # 更新进度: 开始处理
         if progress_callback:
@@ -302,18 +303,14 @@ class VaspWorker:
 
         # 5. 生成MD分析HTML报告
         try:
-            md_report_func = _load_md_report_func()
-            if md_report_func is not None:
-                if progress_callback:
-                    await progress_callback(95, "生成分子动力学分析报告...")
-                html_path = md_report_func(str(work_dir), task_id=task_id, output_dir=str(work_dir / "MD_output"))
-                html_relative_path = get_static_url(html_path)
-                final_result["md_analysis_report_html_path"] = html_relative_path
-                final_result["md_output_dir"] = str(work_dir / "MD_output")
-            else:
-                print("⚠️ 未找到 MD 分析报告生成函数，跳过报告生成。")
+            if progress_callback:
+                await progress_callback(95, "生成分子动力学分析报告...")
+            html_path = generate_md_analysis_report(str(work_dir), task_id=task_id, output_dir=str(work_dir / "MD_output"))
+            html_relative_path = get_static_url(html_path)
+            final_result["md_analysis_report_html_path"] = html_relative_path
+            final_result["md_output_dir"] = str(work_dir / "MD_output")
         except Exception as e:
-            print(f"⚠️ 生成MD分析报告失败: {e}")
+            logger.warning(f"生成MD分析报告失败: {e}")
         
         # 确保 work_directory 存在
         final_result['work_directory'] = str(work_dir)
@@ -323,124 +320,6 @@ class VaspWorker:
 
         return final_result
 
-    async def _run_multi_temperature_md(self, task_id: str, params: Dict[str, Any], temperatures: List[float], progress_callback=None) -> Dict[str, Any]:
-        """运行多温度MD计算"""
-        work_dir = self.base_work_dir / task_id
-        
-        print(f"🌡️ 开始多温度MD计算，温度列表: {temperatures}")
-        
-        if progress_callback:
-            await progress_callback(5, f"开始多温度MD计算，共{len(temperatures)}个温度点...")
-        
-        # 准备基础文件（共享的结构文件等）
-        base_md_files = await self._prepare_md_files(work_dir, params, progress_callback)
-        if not base_md_files:
-            raise Exception("无法准备MD计算文件")
-        
-        # 创建子任务结果列表
-        subtask_results = []
-        completed_count = 0
-        failed_count = 0
-        total_temps = len(temperatures)
-        
-        # 为每个温度创建子任务
-        for i, temp in enumerate(temperatures):
-            try:
-                print(f"🔥 处理温度 {temp}K ({i+1}/{total_temps})")
-                
-                if progress_callback:
-                    progress = 10 + (i * 80 // total_temps)
-                    await progress_callback(progress, f"计算温度 {temp}K ({i+1}/{total_temps})")
-                
-                # 创建温度专用子目录
-                temp_dir = work_dir / f"T_{temp}K"
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                
-                # 复制基础文件到子目录
-                await self._copy_base_files_to_temp_dir(base_md_files, temp_dir)
-                
-                # 为该温度生成专门的MD输入文件
-                temp_params = params.copy()
-                temp_params['temperature'] = temp
-                await self._generate_md_inputs_for_temperature(temp_dir, temp_params, temp)
-                
-                # 运行该温度的VASP计算
-                temp_result = await self._run_vasp_calculation(temp_dir, None)  # 不传递进度回调避免混乱
-                
-                # 分析该温度的结果
-                temp_analysis = await self._analyze_md_results(temp_dir, temp_result)
-                
-                # 创建子任务结果
-                subtask_result = {
-                    "temperature": temp,
-                    "subtask_dir": str(temp_dir),
-                    "md_structure": temp_analysis.get("md_structure"),
-                    "xdatcar_path": temp_analysis.get("xdatcar_path"),
-                    "oszicar_path": temp_analysis.get("oszicar_path"),
-                    "final_energy": temp_analysis.get("final_energy"),
-                    "average_temperature": temp_analysis.get("average_temperature"),
-                    "total_md_steps": temp_analysis.get("total_md_steps"),
-                    "convergence": temp_analysis.get("convergence", False),
-                    "computation_time": temp_analysis.get("computation_time"),
-                    "trajectory_data": temp_analysis.get("trajectory_data"),
-                    "status": "completed" if temp_analysis.get("convergence", False) else "failed",
-                    "error_message": temp_analysis.get("error_message")
-                }
-                
-                subtask_results.append(subtask_result)
-                
-                if temp_analysis.get("convergence", False):
-                    completed_count += 1
-                    print(f"✅ 温度 {temp}K 计算成功")
-                else:
-                    failed_count += 1
-                    print(f"❌ 温度 {temp}K 计算失败")
-                    
-            except Exception as e:
-                print(f"❌ 温度 {temp}K 计算出错: {str(e)}")
-                failed_count += 1
-                
-                subtask_result = {
-                    "temperature": temp,
-                    "subtask_dir": str(work_dir / f"T_{temp}K"),
-                    "status": "failed",
-                    "error_message": str(e),
-                    "convergence": False
-                }
-                subtask_results.append(subtask_result)
-        
-        # 生成多温度分析报告
-        try:
-            if progress_callback:
-                await progress_callback(95, "生成多温度MD分析报告...")
-            html_path = await self._generate_multi_temperature_report(work_dir, task_id, subtask_results)
-            html_relative_path = get_static_url(html_path)    #type: ignore
-        except Exception as e:
-            print(f"⚠️ 生成多温度分析报告失败: {e}")
-            html_path = None
-        
-        # 构建最终结果
-        final_result = {
-            "success": completed_count > 0,  # 至少一个温度成功
-            "is_multi_temperature": True,
-            "total_subtasks": total_temps,
-            "completed_subtasks": completed_count,
-            "failed_subtasks": failed_count,
-            "subtask_results": subtask_results,
-            "md_analysis_report_html_path": html_relative_path,
-            "md_output_dir": str(work_dir / "MD_output"),
-            "work_directory": str(work_dir),
-            "convergence": completed_count > 0,
-            "computation_time": sum([r.get("computation_time", 0) for r in subtask_results if r.get("computation_time")])
-        }
-        
-        if progress_callback:
-            await progress_callback(100, f"多温度MD计算完成！成功: {completed_count}, 失败: {failed_count}")
-        
-        print(f"🎉 多温度MD计算完成！总计: {total_temps}, 成功: {completed_count}, 失败: {failed_count}")
-        
-        return final_result
-    
     async def _get_cif_file(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """获取CIF文件"""
         if params.get('formula'):
@@ -499,16 +378,7 @@ class VaspWorker:
             
             # 复制CONTCAR作为POSCAR
             poscar_path = work_dir / "POSCAR"
-            import shutil
             shutil.copy(str(contcar_path), str(poscar_path))
-            
-            # 修改第一行为计算类型
-            calc_type = params.get('calc_type', 'OXC')
-            with open(poscar_path, 'r') as f:
-                lines = f.readlines()
-            lines[0] = f"{calc_type}\n"
-            with open(poscar_path, 'w') as f:
-                f.writelines(lines)
             
             return str(poscar_path)
             
@@ -553,7 +423,6 @@ class VaspWorker:
             required_files = ["POSCAR", "POTCAR", "CHG", "CHGCAR", "WAVECAR"]
             copied_files = {}
             
-            import shutil
             for filename in required_files:
                 src_path = scf_work_dir / filename
                 dst_path = work_dir / filename
@@ -561,9 +430,9 @@ class VaspWorker:
                 if src_path.exists():
                     shutil.copy(str(src_path), str(dst_path))
                     copied_files[filename] = str(dst_path)
-                    print(f"复制文件: {filename}")
+                    logger.info("复制文件: %s", filename)
                 else:
-                    print(f"⚠️ 文件不存在: {src_path}")
+                    logger.warning("文件不存在: %s", src_path)
                     if filename in ["POSCAR", "POTCAR"]:  # 关键文件
                         raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
             
@@ -608,6 +477,69 @@ class VaspWorker:
         else:
             raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
     
+    async def _prepare_band_structure_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
+        """为能带结构计算准备文件"""
+
+        if params.get('scf_task_id'):
+            # 从已完成的自洽场计算任务获取文件
+            if progress_callback:
+                await progress_callback(15, "从自洽场计算任务获取结果文件...")
+
+            scf_task_id = params['scf_task_id']
+            scf_work_dir = self.base_work_dir / scf_task_id
+
+            required_files = ["POSCAR", "POTCAR", "CHG", "CHGCAR"]
+            copied_files = {}
+
+            for filename in required_files:
+                src_path = scf_work_dir / filename
+                dst_path = work_dir / filename
+
+                if src_path.exists():
+                    shutil.copy(str(src_path), str(dst_path))
+                    copied_files[filename] = str(dst_path)
+                    logger.info("复制文件: %s", filename)
+                else:
+                    logger.warning("文件不存在: %s", src_path)
+                    if filename in ["POSCAR", "POTCAR", "CHGCAR"]:
+                        raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
+
+            return copied_files
+
+        elif params.get('formula'):
+            # 从化学式开始，先做SCF再做band structure
+            if progress_callback:
+                await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
+
+            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
+            if not cif_path:
+                raise Exception("无法获取CIF文件")
+            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
+
+            if progress_callback:
+                await progress_callback(20, "准备SCF+能带结构计算文件...")
+            await self._prepare_scf_then_band_structure_files(work_dir, params)
+
+            return {"POSCAR": str(poscar_path)}
+
+        elif params.get('cif_url'):
+            if progress_callback:
+                await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
+
+            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
+            if not cif_path:
+                raise Exception("无法获取CIF文件")
+            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
+
+            if progress_callback:
+                await progress_callback(20, "准备SCF+能带结构计算文件...")
+            await self._prepare_scf_then_band_structure_files(work_dir, params)
+
+            return {"POSCAR": str(poscar_path)}
+
+        else:
+            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+
     async def _prepare_md_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为分子动力学计算准备文件"""
         
@@ -623,7 +555,6 @@ class VaspWorker:
             required_files = ["POSCAR", "POTCAR"]
             copied_files = {}
             
-            import shutil
             for filename in required_files:
                 src_path = scf_work_dir / filename
                 dst_path = work_dir / filename
@@ -631,9 +562,9 @@ class VaspWorker:
                 if src_path.exists():
                     shutil.copy(str(src_path), str(dst_path))
                     copied_files[filename] = str(dst_path)
-                    print(f"复制MD文件: {filename}")
+                    logger.info("复制MD文件: %s", filename)
                 else:
-                    print(f"⚠️ 文件不存在: {src_path}")
+                    logger.warning("文件不存在: %s", src_path)
                     raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
             
             return copied_files
@@ -693,7 +624,7 @@ class VaspWorker:
         # 4. 应用自定义INCAR参数
         await self._apply_custom_incar(work_dir, params)
         
-        print("纯MD输入文件已准备完成")
+        logger.info("纯MD输入文件已准备完成")
     
     async def _generate_md_inputs(self, work_dir: Path, params: Dict[str, Any], md_files: Dict[str, str]):
         """生成分子动力学VASP输入文件"""
@@ -722,7 +653,7 @@ class VaspWorker:
         with open(kpoints_path, 'w') as f:
             f.write(kpoints_content)
         
-        print("MD KPOINTS已生成: 1x1x1 (固定)")
+        logger.info("MD KPOINTS已生成: 1x1x1 (固定)")
     
     async def _generate_md_incar(self, work_dir: Path, params: Dict[str, Any]):
         """生成分子动力学的INCAR文件"""
@@ -733,9 +664,7 @@ class VaspWorker:
         time_step = params.get('time_step', 1.0)
         ensemble = params.get('ensemble', 'NVT')
         precision = params.get('precision', 'Normal')
-        calc_type = self._get_calc_type_from_params(params)
-        
-        incar_content = f"""SYSTEM = MD-{calc_type}
+        incar_content = f"""SYSTEM = AIMD
 PREC = {precision}
 ISMEAR = 0
 SIGMA = 0.1
@@ -776,14 +705,11 @@ LANGEVIN_GAMMA = 10.0
         with open(incar_path, 'w') as f:
             f.write(incar_content.strip())
         
-        print(f"MD INCAR已生成于 {incar_path} ({ensemble}系综, {md_steps}步, {temperature}K)")
+        logger.info("MD INCAR已生成于 %s (%s系综, %s步, %sK)", incar_path, ensemble, md_steps, temperature)
     
     async def _generate_single_point_md_incar(self, work_dir: Path, params: Dict[str, Any]):
         """生成纯MD的INCAR文件（直接进行分子动力学计算，无需自洽场）"""
-        
-        # 直接调用纯MD的INCAR生成方法
         await self._generate_md_incar(work_dir, params)
-        print("纯MD INCAR已生成（无需自洽场计算）")
     
     async def _analyze_md_results(self, work_dir: Path, run_result: Dict[str, Any]) -> Dict[str, Any]:
         """分析分子动力学计算结果"""
@@ -811,13 +737,13 @@ LANGEVIN_GAMMA = 10.0
             poscar_path = work_dir / "POSCAR"
             if poscar_path.exists():
                 result["md_structure"] = str(poscar_path)
-                print("✅ 找到初始结构文件: POSCAR")
+                logger.info("找到初始结构文件: POSCAR")
             
             # 2. 检查XDATCAR文件（轨迹文件）
             xdatcar_path = work_dir / "XDATCAR"
             if xdatcar_path.exists():
                 result["xdatcar_path"] = str(xdatcar_path)
-                print("✅ 找到轨迹文件: XDATCAR")
+                logger.info("找到轨迹文件: XDATCAR")
                 
                 # 分析轨迹数据
                 try:
@@ -825,13 +751,13 @@ LANGEVIN_GAMMA = 10.0
                     result["trajectory_data"] = trajectory_data
                     result["total_md_steps"] = trajectory_data.get("total_steps", 0)
                 except Exception as e:
-                    print(f"⚠️ 分析轨迹数据失败: {e}")
+                    logger.warning("分析轨迹数据失败: %s", e)
             
             # 3. 检查OSZICAR文件（能量和温度信息）
             oszicar_path = work_dir / "OSZICAR"
             if oszicar_path.exists():
                 result["oszicar_path"] = str(oszicar_path)
-                print("✅ 找到能量文件: OSZICAR")
+                logger.info("找到能量文件: OSZICAR")
                 
                 # 分析能量和温度数据
                 try:
@@ -839,44 +765,44 @@ LANGEVIN_GAMMA = 10.0
                     result["final_energy"] = energy_temp_data.get("final_energy")
                     result["average_temperature"] = energy_temp_data.get("average_temperature")
                 except Exception as e:
-                    print(f"⚠️ 分析能量温度数据失败: {e}")
+                    logger.warning("分析能量温度数据失败: %s", e)
             
             # 4. 检查OUTCAR文件获取更多信息
             outcar_path = work_dir / "OUTCAR"
             if outcar_path.exists():
-                print("✅ 找到输出文件: OUTCAR")
+                logger.info("找到输出文件: OUTCAR")
                 try:
                     # 检查计算是否正常完成
                     with open(outcar_path, 'r') as f:
                         outcar_content = f.read()
                         if "General timing and accounting informations for this job:" in outcar_content:
                             result["convergence"] = True
-                            print("✅ MD计算正常完成")
+                            logger.info("MD计算正常完成")
                         else:
-                            print("⚠️ MD计算可能未正常完成")
+                            logger.warning("MD计算可能未正常完成")
                 except Exception as e:
-                    print(f"⚠️ 分析OUTCAR失败: {e}")
+                    logger.warning("分析OUTCAR失败: %s", e)
             
             # 总结结果
             if result["convergence"]:
-                print(f"🎉 MD计算成功完成!")
+                logger.info("MD计算成功完成!")
                 if result["total_md_steps"]:
-                    print(f"   完成步数: {result['total_md_steps']}")
+                    logger.info("   完成步数: %s", result['total_md_steps'])
                 if result["average_temperature"]:
-                    print(f"   平均温度: {result['average_temperature']:.2f} K")
+                    logger.info("   平均温度: %.2f K", result['average_temperature'])
                 if result["final_energy"]:
-                    print(f"   最终能量: {result['final_energy']:.6f} eV")
+                    logger.info("   最终能量: %.6f eV", result['final_energy'])
             else:
-                print("❌ MD计算未能正常完成")
+                logger.error("MD计算未能正常完成")
             
             return result
             
         except Exception as e:
             error_msg = f"分析MD结果失败: {str(e)}"
-            print(f"[ERROR] {error_msg}")
+            logger.error(error_msg)
             result["error_message"] = error_msg
             return result
-    
+
     async def _extract_trajectory_data(self, xdatcar_path: Path) -> Dict[str, Any]:
         """提取轨迹数据统计信息"""
         
@@ -911,10 +837,10 @@ LANGEVIN_GAMMA = 10.0
             
             trajectory_data["total_steps"] = step_count
             
-            print(f"轨迹分析: 共 {step_count} 个MD步")
-            
+            logger.info("轨迹分析: 共 %s 个MD步", step_count)
+
         except Exception as e:
-            print(f"提取轨迹数据失败: {e}")
+            logger.error("提取轨迹数据失败: %s", e)
             raise
         
         return trajectory_data
@@ -966,15 +892,15 @@ LANGEVIN_GAMMA = 10.0
             if energies:
                 energy_temp_data["final_energy"] = energies[-1]
                 energy_temp_data["energy_series"] = energies[-min(100, len(energies)):]  # 保存最后100个数据点
-                print(f"能量分析: 最终能量 = {energies[-1]:.6f} eV")
+                logger.info("能量分析: 最终能量 = %.6f eV", energies[-1])
             
             if temperatures:
                 energy_temp_data["average_temperature"] = sum(temperatures) / len(temperatures)
                 energy_temp_data["temperature_series"] = temperatures[-min(100, len(temperatures)):]  # 保存最后100个数据点
-                print(f"温度分析: 平均温度 = {energy_temp_data['average_temperature']:.2f} K")
+                logger.info("温度分析: 平均温度 = %.2f K", energy_temp_data['average_temperature'])
             
         except Exception as e:
-            print(f"提取能量温度数据失败: {e}")
+            logger.error("提取能量温度数据失败: %s", e)
             raise
         
         return energy_temp_data
@@ -997,7 +923,7 @@ LANGEVIN_GAMMA = 10.0
         # 4. 应用自定义INCAR参数
         await self._apply_custom_incar(work_dir, params)
         
-        print("单点自洽+DOS输入文件已准备完成")
+        logger.info("单点自洽+DOS输入文件已准备完成")
     
     async def _apply_kpoint_multiplier(self, work_dir: Path, multiplier: float):
         """应用K点倍增因子"""
@@ -1021,7 +947,7 @@ LANGEVIN_GAMMA = 10.0
                         with open(kpoints_path, 'w') as f:
                             f.writelines(lines)
                         
-                        print(f"K点网格已调整: {new_nx}x{new_ny}x{new_nz} (倍增: {multiplier})")
+                        logger.info("K点网格已调整: %sx%sx%s (倍增: %s)", new_nx, new_ny, new_nz, multiplier)
                     except ValueError:
                         pass
     
@@ -1029,12 +955,10 @@ LANGEVIN_GAMMA = 10.0
         """生成单点自洽+DOS的INCAR文件"""
         from .base import generate_incar
         
-        # 获取计算类型和精度
-        calc_type = self._get_calc_type_from_params(params)
         precision = params.get('precision', 'Accurate')
-        
+
         # 先生成基础INCAR
-        generate_incar(str(work_dir), calc_type)
+        generate_incar(str(work_dir))
         
         # 读取生成的INCAR
         incar_path = work_dir / "INCAR"
@@ -1082,12 +1006,12 @@ LANGEVIN_GAMMA = 10.0
         with open(incar_path, 'w') as f:
             f.writelines(new_lines)
         
-        print(f"单点自洽+DOS INCAR已生成于 {incar_path}")
+        logger.info("单点自洽+DOS INCAR已生成于 %s", incar_path)
     
     async def _convert_cif_to_poscar(self, cif_path: str, work_dir: Path, params: Dict[str, Any]) -> str:
         """转换CIF为POSCAR"""
         from .base import cif_to_poscar
-        print(f"🔍 转换CIF为POSCAR: {cif_path}")
+        logger.info("转换CIF为POSCAR: %s", cif_path)
         # 修改POSCAR第一行为计算类型
         poscar_path = cif_to_poscar(cif_path, str(work_dir))
         
@@ -1095,36 +1019,20 @@ LANGEVIN_GAMMA = 10.0
         with open(poscar_path, 'r') as f:
             lines = f.readlines()
         
-        # 修改第一行为计算类型
-        calc_type = self._get_calc_type_from_params(params)
-        lines[0] = f"{calc_type}\n"
-        
-        # 写回文件
-        with open(poscar_path, 'w') as f:
-            f.writelines(lines)
-        
         return poscar_path
-    
-    def _get_calc_type_from_params(self, params: Dict[str, Any]) -> str:
-        """从参数中获取计算类型"""
-        calc_type = params.get('calc_type', 'OXC')
-        return calc_type
-    
+
     async def _generate_vasp_inputs(self, work_dir: Path, params: Dict[str, Any]):
         """生成VASP输入文件"""
         from .base import generate_kpoints, generate_potcar, generate_incar
-        
-        calc_type = self._get_calc_type_from_params(params)
-        kpoint_density = params.get('kpoint_density', 30.0)
-        
+
         # 生成KPOINTS
         generate_kpoints(str(work_dir))
-        
+
         # 生成POTCAR
         generate_potcar(str(work_dir))
-        
+
         # 生成INCAR
-        generate_incar(str(work_dir), calc_type)
+        generate_incar(str(work_dir))
         
         # 应用自定义INCAR参数
         await self._apply_custom_incar(work_dir, params)
@@ -1132,18 +1040,17 @@ LANGEVIN_GAMMA = 10.0
     async def _generate_scf_inputs(self, work_dir: Path, params: Dict[str, Any]):
         """生成自洽场VASP输入文件"""
         from .base import generate_kpoints, generate_potcar, generate_incar
-        
-        calc_type = self._get_calc_type_from_params(params)
+
         precision = params.get('precision', 'Accurate')
-        
+
         # 生成KPOINTS (自洽场计算通常使用更密的K点网格)
         generate_kpoints(str(work_dir))
-        
+
         # 生成POTCAR
         generate_potcar(str(work_dir))
-        
+
         # 生成基础INCAR
-        generate_incar(str(work_dir), calc_type)
+        generate_incar(str(work_dir))
         
         # 修改INCAR为自洽场计算设置
         await self._modify_incar_for_scf(work_dir, precision)
@@ -1202,7 +1109,7 @@ LANGEVIN_GAMMA = 10.0
         with open(incar_path, 'w') as f:
             f.writelines(new_lines)
         
-        print(f"自洽场INCAR已生成于 {incar_path}")
+        logger.info("自洽场INCAR已生成于 %s", incar_path)
     
     async def _generate_dos_inputs(self, work_dir: Path, params: Dict[str, Any], dos_files: Dict[str, str]):
         """生成态密度VASP输入文件"""
@@ -1237,8 +1144,7 @@ LANGEVIN_GAMMA = 10.0
         else:
             # 生成基础INCAR
             from .base import generate_incar
-            calc_type = self._get_calc_type_from_params(params)
-            generate_incar(str(work_dir), calc_type)
+            generate_incar(str(work_dir))
             
             # 读取生成的INCAR
             with open(work_dir / "INCAR", 'r') as f:
@@ -1281,7 +1187,7 @@ LANGEVIN_GAMMA = 10.0
         with open(dos_incar_path, 'w') as f:
             f.writelines(new_lines)
         
-        print(f"DOS INCAR已生成于 {dos_incar_path}")
+        logger.info("DOS INCAR已生成于 %s", dos_incar_path)
     
     async def _generate_dos_kpoints(self, work_dir: Path, params: Dict[str, Any]):
         """生成DOS计算的KPOINTS文件"""
@@ -1323,7 +1229,7 @@ LANGEVIN_GAMMA = 10.0
                             with open(dos_kpoints_path, 'w') as f:
                                 f.writelines(lines)
                             
-                            print(f"DOS KPOINTS已生成: {new_nx}x{new_ny}x{new_nz} (倍增因子: {kpoint_multiplier})")
+                            logger.info("DOS KPOINTS已生成: %sx%sx%s (倍增因子: %s)", new_nx, new_ny, new_nz, kpoint_multiplier)
                             return
                         except ValueError:
                             pass
@@ -1331,8 +1237,186 @@ LANGEVIN_GAMMA = 10.0
         # 如果无法从原有KPOINTS倍增，则生成新的
         from .base import generate_kpoints
         generate_kpoints(str(work_dir))
-        print("已生成默认DOS KPOINTS")
-    
+        logger.info("已生成默认DOS KPOINTS")
+
+    async def _generate_band_structure_inputs(self, work_dir: Path, params: Dict[str, Any], bs_files: Dict[str, str]):
+        """生成能带结构VASP输入文件"""
+
+        # 1. 修改INCAR文件用于能带结构计算
+        await self._modify_incar_for_band_structure(work_dir, params)
+
+        # 2. 生成高对称k路径KPOINTS
+        await self._generate_band_structure_kpoints(work_dir, params)
+
+        # 3. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
+
+    async def _modify_incar_for_band_structure(self, work_dir: Path, params: Dict[str, Any]):
+        """修改INCAR文件用于能带结构计算"""
+
+        scf_task_id = params.get('scf_task_id')
+        if scf_task_id:
+            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_incar_path = scf_work_dir / "INCAR"
+
+            if not scf_incar_path.exists():
+                raise Exception(f"SCF任务 {scf_task_id} 的INCAR文件不存在")
+
+            with open(scf_incar_path, 'r') as f:
+                lines = f.readlines()
+        else:
+            from .base import generate_incar
+            generate_incar(str(work_dir))
+
+            with open(work_dir / "INCAR", 'r') as f:
+                lines = f.readlines()
+
+        new_lines = []
+
+        for line in lines:
+            stripped = line.strip().upper()
+
+            if stripped.startswith("SYSTEM"):
+                new_lines.append("SYSTEM = BAND\n")
+            elif stripped.startswith("NSW"):
+                new_lines.append("NSW = 0\n")
+            elif stripped.startswith("IBRION"):
+                new_lines.append("IBRION = -1\n")
+            elif stripped.startswith("ICHARG"):
+                new_lines.append("ICHARG = 11\n")  # 从CHGCAR读取电荷密度
+            elif stripped.startswith("ISMEAR"):
+                new_lines.append("ISMEAR = 0\n")  # Gaussian展宽（能带结构不用四面体）
+            elif stripped.startswith("SIGMA"):
+                new_lines.append("SIGMA = 0.05\n")
+            elif stripped.startswith("LWAVE"):
+                new_lines.append("LWAVE = .FALSE.\n")
+            elif stripped.startswith("LCHARG"):
+                new_lines.append("LCHARG = .FALSE.\n")
+            else:
+                new_lines.append(line)
+
+        # 添加能带结构专用设置
+        new_lines.append("\n# 能带结构计算专用设置\n")
+        new_lines.append("LORBIT = 11\n")  # 轨道投影
+
+        incar_path = work_dir / "INCAR"
+        with open(incar_path, 'w') as f:
+            f.writelines(new_lines)
+
+        logger.info("能带结构 INCAR 已生成于 %s", incar_path)
+
+    async def _generate_band_structure_kpoints(self, work_dir: Path, params: Dict[str, Any]):
+        """使用 pymatgen HighSymmKpath 生成高对称k路径的KPOINTS文件"""
+
+        line_density = params.get('line_density', 20)
+
+        poscar_path = work_dir / "POSCAR"
+        if not poscar_path.exists():
+            raise Exception("POSCAR文件不存在，无法生成高对称k路径")
+
+        try:
+            from pymatgen.core import Structure
+            from pymatgen.symmetry.bandstructure import HighSymmKpath
+
+            structure = Structure.from_file(str(poscar_path))
+            kpath = HighSymmKpath(structure)
+            kpts = kpath.kpath
+
+            # 生成线模式KPOINTS
+            kpoints_lines = ["K-Path generated by pymatgen\n"]
+            kpoints_lines.append(f"{line_density}\n")
+            kpoints_lines.append("Line-mode\n")
+            kpoints_lines.append("Reciprocal\n")
+
+            path_segments = kpts['path']
+            kpts_coords = kpts['kpoints']
+
+            for segment in path_segments:
+                for i in range(len(segment) - 1):
+                    start_label = segment[i]
+                    end_label = segment[i + 1]
+                    start_coord = kpts_coords[start_label]
+                    end_coord = kpts_coords[end_label]
+
+                    kpoints_lines.append(
+                        f"  {start_coord[0]:.10f}  {start_coord[1]:.10f}  {start_coord[2]:.10f}  ! {start_label}\n"
+                    )
+                    kpoints_lines.append(
+                        f"  {end_coord[0]:.10f}  {end_coord[1]:.10f}  {end_coord[2]:.10f}  ! {end_label}\n"
+                    )
+                    kpoints_lines.append("\n")
+
+            kpoints_path = work_dir / "KPOINTS"
+            with open(kpoints_path, 'w') as f:
+                f.writelines(kpoints_lines)
+
+            # 保存k路径信息供后续分析使用
+            import json
+            kpath_info = {
+                "path": path_segments,
+                "kpoints": {k: list(v) for k, v in kpts_coords.items()},
+                "line_density": line_density,
+            }
+            with open(work_dir / "kpath_info.json", 'w') as f:
+                json.dump(kpath_info, f, indent=2)
+
+            logger.info("能带结构 KPOINTS 已生成 (line_density=%d, 路径段数=%d)",
+                        line_density, sum(len(s) - 1 for s in path_segments))
+
+        except ImportError:
+            raise Exception("需要安装 pymatgen 来生成高对称k路径: pip install pymatgen")
+
+    async def _prepare_scf_then_band_structure_files(self, work_dir: Path, params: Dict[str, Any]):
+        """准备从头开始的SCF+能带结构计算输入文件
+
+        当没有scf_task_id时，先做一次SCF计算得到CHGCAR，
+        然后再做能带结构计算。这里生成的是能带结构的输入文件，
+        ICHARG=2表示从头计算电荷密度（非自洽读取模式）。
+        """
+        from .base import generate_kpoints, generate_potcar, generate_incar
+
+        # 1. 生成POTCAR
+        generate_potcar(str(work_dir))
+
+        # 2. 生成能带结构k路径
+        await self._generate_band_structure_kpoints(work_dir, params)
+
+        # 3. 生成INCAR（直接用能带结构模式，ICHARG=2从头算）
+        generate_incar(str(work_dir))
+
+        incar_path = work_dir / "INCAR"
+        with open(incar_path, 'r') as f:
+            lines = f.readlines()
+
+        new_lines = []
+        for line in lines:
+            stripped = line.strip().upper()
+            if stripped.startswith("SYSTEM"):
+                new_lines.append("SYSTEM = BAND\n")
+            elif stripped.startswith("NSW"):
+                new_lines.append("NSW = 0\n")
+            elif stripped.startswith("IBRION"):
+                new_lines.append("IBRION = -1\n")
+            elif stripped.startswith("ISMEAR"):
+                new_lines.append("ISMEAR = 0\n")
+            elif stripped.startswith("LWAVE"):
+                new_lines.append("LWAVE = .FALSE.\n")
+            elif stripped.startswith("LCHARG"):
+                new_lines.append("LCHARG = .TRUE.\n")  # 保存电荷密度
+            else:
+                new_lines.append(line)
+
+        new_lines.append("\n# 能带结构计算\n")
+        new_lines.append("LORBIT = 11\n")
+
+        with open(incar_path, 'w') as f:
+            f.writelines(new_lines)
+
+        # 4. 应用自定义INCAR参数
+        await self._apply_custom_incar(work_dir, params)
+
+        logger.info("SCF+能带结构输入文件已准备完成")
+
     async def _run_vasp_calculation(self, work_dir: Path, progress_callback=None) -> Dict[str, Any]:
         """运行VASP计算"""
         import re
@@ -1342,24 +1426,29 @@ LANGEVIN_GAMMA = 10.0
         if progress_callback:
             await progress_callback(35, "提交VASP作业...")
         
-        # SLURM作业调度参数
-        nodes = 2                    # 节点数
-        total_tasks = 80             # 总任务数
-        tasks_per_node = 40          # 每节点任务数
+        # SLURM作业调度参数（可通过环境变量覆盖）
+        nodes = int(os.getenv("SLURM_NODES", "2"))  # 节点数
+        total_tasks = int(os.getenv("SLURM_NTASKS", "80"))  # 总任务数
+        tasks_per_node = int(os.getenv("SLURM_TASKS_PER_NODE", "40"))  # 每节点任务数
+        partition = os.getenv("SLURM_PARTITION", "p1")
+        time_limit = os.getenv("SLURM_TIME_LIMIT", "24:00:00")
+        module_load = os.getenv("SLURM_MODULE_LOAD", "vasp/6.3.2-intel")
+        oneapi_env_script = os.getenv("ONEAPI_ENV_SCRIPT", "/data/app/intel/oneapi-2023.2/setvars.sh")
+        run_line = os.getenv("VASP_SLURM_RUN_LINE", "mpirun -np $SLURM_NPROCS vasp_std>result.log 2>&1")
         
         script = f"""#!/bin/bash
 #SBATCH -N {nodes}
 #SBATCH -n {total_tasks}
 #SBATCH --job-name={work_dir.name}
-#SBATCH --partition=p1
+#SBATCH --partition={partition}
 #SBATCH --ntasks-per-node={tasks_per_node}
 #SBATCH --cpus-per-task=1
-#SBATCH --time=24:00:00
+#SBATCH --time={time_limit}
 #SBATCH --output=%j.out
 #SBATCH --error=%j.err
 
-module load vasp/6.3.2-intel
-source /data/app/intel/oneapi-2023.2/setvars.sh >/dev/null 2>&1
+{"module load " + module_load if module_load else ""}
+{"source " + oneapi_env_script + " >/dev/null 2>&1" if oneapi_env_script else ""}
 ulimit -s unlimited
 ulimit -l unlimited
 
@@ -1372,8 +1461,8 @@ echo "每节点任务数: $SLURM_NTASKS_PER_NODE"
 echo "节点列表: $SLURM_JOB_NODELIST"
 
 echo "=== 开始VASP计算 ==="
-mpirun -np $SLURM_NPROCS vasp_std>result.log 2>&1
-echo "VASP计算完成
+{run_line}
+echo "VASP计算完成"
         """
 
         # 使用.sh扩展名
@@ -1400,14 +1489,14 @@ echo "VASP计算完成
             
             # 解析SLURM作业ID
             output = submit_stdout.decode().strip()
-            print(f"✅ 作业提交成功: {output}")
+            logger.info("作业提交成功: %s", output)
             
             job_match = re.search(r'(\d+)', output)
             if not job_match:
                 raise Exception(f"无法解析SLURM作业ID: {output}")
             
             slurm_job_id = job_match.group(1)
-            print(f"🆔 SLURM作业ID: {slurm_job_id}")
+            logger.info("SLURM作业ID: %s", slurm_job_id)
             
             # 通过回调传递作业ID
             if progress_callback:
@@ -1433,10 +1522,10 @@ echo "VASP计算完成
                     if status == "":
                         # 作业不在队列中，可能已完成
                         job_completed = True
-                        print("✅ 作业已完成（不在队列中）")
+                        logger.info("作业已完成（不在队列中）")
                     elif status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"]:
                         job_completed = True
-                        print(f"✅ 作业状态: {status}")
+                        logger.info("作业状态: %s", status)
                         
                         if status != "COMPLETED":
                             # 检查错误日志
@@ -1462,10 +1551,10 @@ echo "VASP计算完成
                         if progress_callback:
                             await progress_callback(min(progress, 90), f"VASP{status_msg}...")
                         
-                        print(f"🔄 作业状态: {status}")
+                        logger.info("作业状态: %s", status)
                 else:
                     # 查询失败，可能作业已完成
-                    print("⚠️  无法查询作业状态，检查是否已完成")
+                    logger.warning("无法查询作业状态，检查是否已完成")
                     job_completed = True
                 
                 if not job_completed:
@@ -1689,32 +1778,21 @@ echo "VASP计算完成
 
     def _run_bader_analysis(self, work_dir: Path):
         """运行Bader电荷分析"""
-        print("--------------------------------")
-        print("运行Bader电荷分析")
-        print("--------------------------------")
+        logger.info("运行Bader电荷分析")
         CHGSUM_PL_PATH = get_path_config()["CHGSUM_PL_PATH"]
         BADER_PATH = get_path_config()["BADER_PATH"]
-        print("--------------------------------")
-        print("CHGSUM_PL_PATH: ", CHGSUM_PL_PATH)
-        print("--------------------------------")
-        print("BADER_PATH: ", BADER_PATH)
-        print("--------------------------------")
+        logger.debug("CHGSUM_PL_PATH: %s", CHGSUM_PL_PATH)
+        logger.debug("BADER_PATH: %s", BADER_PATH)
         for f in ["AECCAR0", "AECCAR2", "CHGCAR"]:
-            if not os.path.exists(os.path.join(work_dir, f)): 
-                print("--------------------------------")
-                print("未找到Bader分析所需文件: ", f)
-                print("--------------------------------")
+            if not os.path.exists(os.path.join(work_dir, f)):
+                logger.error("未找到Bader分析所需文件: %s", f)
                 raise Exception("  - 错误: 未找到Bader分析所需文件 {}。".format(f))
         chgsum_cmd = ["perl", CHGSUM_PL_PATH, "AECCAR0", "AECCAR2"]
-        print("--------------------------------")
-        print("chgsum_cmd: ", chgsum_cmd)
-        print("--------------------------------")
+        logger.debug("chgsum_cmd: %s", chgsum_cmd)
         result = subprocess.run(
             chgsum_cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True
         )
-        print("--------------------------------")
-        print("result: ", result)
-        print("--------------------------------")
+        logger.debug("result: %s", result)
         if result.returncode != 0:
             raise Exception("  - 错误: 生成 CHGCAR_sum 文件失败。")
         if not os.path.exists(os.path.join(work_dir, "CHGCAR_sum")): 
@@ -1731,46 +1809,28 @@ echo "VASP计算完成
         """分析自洽场计算结果"""
         try:
             # 检查收敛性
-            print("--------------------------------")
-            print("检查收敛性")
-            print("--------------------------------")
+            logger.debug("检查收敛性")
             outcar_path = work_dir / "OUTCAR"
             convergence = self._check_convergence(outcar_path)
-            print("--------------------------------")
-            print("收敛性: ", convergence)
-            print("--------------------------------")
+            logger.debug("收敛性: %s", convergence)
             # 提取总能量
             total_energy = self._extract_energy(outcar_path)
-            print("--------------------------------")
-            print("总能量: ", total_energy)
-            print("--------------------------------")
+            logger.debug("总能量: %s", total_energy)
             # 提取费米能级
             fermi_energy = self._extract_fermi_energy(outcar_path)
-            print("--------------------------------")
-            print("费米能级: ", fermi_energy)
-            print("--------------------------------")
+            logger.debug("费米能级: %s", fermi_energy)
             # 提取带隙
             band_gap = self._extract_band_gap(outcar_path)
-            print("--------------------------------")
-            print("带隙: ", band_gap)
-            print("--------------------------------")
+            logger.debug("带隙: %s", band_gap)
             # 提取电子步数
             electronic_steps = self._extract_electronic_steps(outcar_path)
-            print("--------------------------------")
-            print("电子步数: ", electronic_steps)
-            print("--------------------------------")
+            logger.debug("电子步数: %s", electronic_steps)
             # 运行Bader电荷分析
-            print("--------------------------------")
-            print("运行Bader电荷分析")
-            print("--------------------------------")
+            logger.info("运行Bader电荷分析")
             self._run_bader_analysis(work_dir)
-            print("--------------------------------")
-            print("Bader电荷分析完成")
-            print("--------------------------------")
+            logger.info("Bader电荷分析完成")
             # 生成可视化分析报告（使用新的SCF分析器）
-            print("--------------------------------")
-            print("生成可视化分析报告")
-            print("--------------------------------")
+            logger.info("生成可视化分析报告")
             html_report_path = None
             analysis_data = None
             try:
@@ -1782,9 +1842,9 @@ echo "VASP计算完成
                     
                     # 生成HTML报告
                     html_report_path = generate_scf_report(str(work_dir), "scf")
-                    print(f"📊 SCF计算分析报告已生成: {html_report_path}")
+                    logger.info("SCF计算分析报告已生成: %s", html_report_path)
             except Exception as e:
-                print(f"⚠️ 生成SCF可视化分析报告失败: {e}")
+                logger.warning("生成SCF可视化分析报告失败: %s", e)
             
             # SCF结构文件路径
             poscar_path = work_dir / "POSCAR"
@@ -1927,9 +1987,9 @@ echo "VASP计算完成
                     analysis_data = analyzer.analyze()
                     # 生成HTML报告
                     html_report_path = generate_pymatgen_dos_report(str(work_dir), task_id="dos")
-                    print(f"📊 DOS计算分析报告已生成: {html_report_path}")
+                    logger.info("DOS计算分析报告已生成: %s", html_report_path)
             except Exception as e:
-                print(f"⚠️ 生成DOS可视化分析报告失败: {e}")
+                logger.warning("生成DOS可视化分析报告失败: %s", e)
             
             # DOS结构文件路径
             poscar_path = work_dir / "POSCAR"
@@ -1981,6 +2041,108 @@ echo "VASP计算完成
                 'work_directory': str(work_dir)
             }
     
+    async def _analyze_band_structure_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
+        """分析能带结构计算结果"""
+        try:
+            outcar_path = work_dir / "OUTCAR"
+            convergence = self._check_convergence(outcar_path)
+            total_energy = self._extract_energy(outcar_path)
+            fermi_energy = self._extract_fermi_energy(outcar_path)
+
+            # 使用pymatgen解析能带结构
+            band_gap = None
+            is_direct = None
+            vbm = None
+            cbm = None
+            kpath_info = None
+
+            try:
+                from pymatgen.io.vasp import Vasprun
+                from pymatgen.electronic_structure.plotter import BSPlotter
+
+                vasprun_path = work_dir / "vasprun.xml"
+                if vasprun_path.exists():
+                    vasprun = Vasprun(str(vasprun_path), parse_projected_eigen=True)
+                    bs = vasprun.get_band_structure(line_mode=True)
+
+                    band_gap = bs.get_band_gap()['energy']
+                    is_direct = bs.get_band_gap()['direct']
+
+                    if band_gap > 0:
+                        vbm = bs.get_vbm()['energy']
+                        cbm = bs.get_cbm()['energy']
+
+                    logger.info("能带结构解析完成: band_gap=%.4f eV, direct=%s", band_gap, is_direct)
+            except Exception as e:
+                logger.warning("pymatgen 能带结构解析失败: %s", e)
+                band_gap = self._extract_band_gap(outcar_path)
+
+            # 读取k路径信息
+            kpath_json = work_dir / "kpath_info.json"
+            if kpath_json.exists():
+                import json
+                with open(kpath_json, 'r') as f:
+                    kpath_info = json.load(f)
+
+            # 生成可视化分析报告
+            html_report_path = None
+            analysis_data = None
+            try:
+                from .analyzers.band_structure import BandStructureAnalyzer, generate_band_structure_report
+                if outcar_path.exists():
+                    analyzer = BandStructureAnalyzer(str(work_dir))
+                    analysis_data = analyzer.analyze()
+                    html_report_path = generate_band_structure_report(str(work_dir))
+                    logger.info("能带结构分析报告已生成: %s", html_report_path)
+            except Exception as e:
+                logger.warning("生成能带结构可视化分析报告失败: %s", e)
+
+            poscar_path = work_dir / "POSCAR"
+            band_structure_path = str(poscar_path) if poscar_path.exists() else None
+
+            result = {
+                'success': True,
+                'convergence': convergence,
+                'total_energy': total_energy,
+                'fermi_energy': fermi_energy,
+                'band_gap': band_gap,
+                'is_direct': is_direct,
+                'vbm': vbm,
+                'cbm': cbm,
+                'band_structure_path': band_structure_path,
+                'kpath_info': kpath_info,
+                'computation_time': vasp_result.get('computation_time'),
+                'process_id': vasp_result.get('process_id'),
+                'work_directory': str(work_dir),
+            }
+
+            if html_report_path:
+                result['band_structure_report_html_path'] = get_static_url(html_report_path)
+
+            simplified_result = {
+                'success': result['success'],
+                'convergence': result['convergence'],
+                'total_energy': result['total_energy'],
+                'fermi_energy': result['fermi_energy'],
+                'band_gap': result['band_gap'],
+                'is_direct': result['is_direct'],
+                'vbm': result['vbm'],
+                'cbm': result['cbm'],
+                'band_structure_path': get_download_url(result['band_structure_path']) if result['band_structure_path'] else None,
+                'band_structure_report_html_path': result.get('band_structure_report_html_path'),
+                'kpath_info': result['kpath_info'],
+                'analysis_data': analysis_data,
+                'Note': "More analysis results and visualization are available in the analysis html report.",
+            }
+            return simplified_result
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"能带结构结果分析失败: {str(e)}",
+                'work_directory': str(work_dir),
+            }
+
     def _extract_dos_data(self, doscar_path: Path) -> Optional[dict]:
         """从DOSCAR文件提取态密度数据"""
         try:
@@ -2032,7 +2194,7 @@ echo "VASP计算完成
             return result
             
         except Exception as e:
-            print(f"提取DOS数据失败: {str(e)}")
+            logger.error("提取DOS数据失败: %s", str(e))
             return None
     
     def _extract_kpoints_info(self, kpoints_path: Path) -> Optional[list]:
@@ -2058,7 +2220,7 @@ echo "VASP计算完成
         
         incar_path = work_dir / "INCAR"
         if not incar_path.exists():
-            print(f"⚠️ INCAR文件不存在: {incar_path}")
+            logger.warning("INCAR文件不存在: %s", incar_path)
             return
         
         try:
@@ -2078,7 +2240,7 @@ echo "VASP计算完成
             for key, value in custom_incar.items():
                 key_upper = key.upper()
                 existing_params[key_upper] = str(value)
-                print(f"🔧 自定义INCAR参数: {key_upper} = {value}")
+                logger.debug("自定义INCAR参数: %s = %s", key_upper, value)
             
             # 重新写入INCAR文件
             with open(incar_path, 'w') as f:
@@ -2091,732 +2253,500 @@ echo "VASP计算完成
                 if custom_incar:
                     f.write(f"\n# Custom parameters applied: {list(custom_incar.keys())}\n")
             
-            print(f"✅ 已应用 {len(custom_incar)} 个自定义INCAR参数")
+            logger.info("已应用 %d 个自定义INCAR参数", len(custom_incar))
             
         except Exception as e:
-            print(f"❌ 应用自定义INCAR参数失败: {e}")
+            logger.error("应用自定义INCAR参数失败: %s", e)
             # 不抛出异常，继续计算，因为自定义参数是可选的
-    
-    async def _copy_base_files_to_temp_dir(self, base_files: Dict[str, str], temp_dir: Path) -> None:
-        """复制基础文件到温度子目录"""
-        import shutil
-        
-        for file_type, file_path in base_files.items():
-            if file_path and Path(file_path).exists():
-                src_path = Path(file_path)
-                dst_path = temp_dir / src_path.name
-                try:
-                    shutil.copy2(str(src_path), str(dst_path))
-                    print(f"📁 复制文件 {src_path.name} 到 {temp_dir.name}")
-                except Exception as e:
-                    print(f"⚠️ 复制文件 {src_path.name} 失败: {e}")
-    
-    async def _generate_md_inputs_for_temperature(self, temp_dir: Path, params: Dict[str, Any], temperature: float) -> None:
-        """为特定温度生成MD输入文件"""
-        # 生成固定的MD KPOINTS (1 1 1)
-        await self._generate_md_kpoints(temp_dir)
-        
-        # 生成温度专用的MD INCAR
-        await self._generate_md_incar(temp_dir, params)
-        
-        # 应用自定义INCAR参数
-        await self._apply_custom_incar(temp_dir, params)
-        
-        print(f"🌡️ 已为温度 {temperature}K 生成输入文件")
-    
-    async def _generate_multi_temperature_report(self, work_dir: Path, task_id: str, subtask_results: List[Dict]) -> Optional[str]:
-        """生成增强的多温度MD分析报告，包含Arrhenius分析和标签页界面"""
-        try:
-            from datetime import datetime
-            import numpy as np
-            import base64
-            import io
-            
-            # 创建MD输出目录
-            output_dir = work_dir / "MD_output"
-            output_dir.mkdir(exist_ok=True)
-            
-            # 执行多温度分析
-            analysis_results = await self._perform_multi_temperature_analysis(work_dir, subtask_results, output_dir)
-            
-            # 生成各温度点的单独HTML
-            temp_html_tabs = await self._generate_individual_temp_htmls(work_dir, subtask_results, output_dir)
-            
-            # 构建综合HTML报告
-            html_content = self._build_comprehensive_html(
-                task_id, subtask_results, analysis_results, temp_html_tabs, output_dir
-            )
-            
-            # 保存HTML报告
-            html_path = output_dir / "comprehensive_multi_temperature_report.html"
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            
-            print(f"📄 增强多温度MD报告已生成: {html_path}")
-            return str(html_path)
-            
-        except Exception as e:
-            print(f"❌ 生成多温度报告失败: {e}")
-            return None
-    
-    async def _perform_multi_temperature_analysis(self, work_dir: Path, subtask_results: List[Dict], output_dir: Path) -> Dict:
-        """执行多温度分析，包括Arrhenius分析"""
-        analysis_results = {
-            'arrhenius': None,
-            'diffusion_data': [],
-            'temperature_trend': None
-        }
-        
-        try:
-            # 收集成功的温度点数据
-            valid_temps = []
-            valid_diffusions = []
-            
-            for result in subtask_results:
-                if result.get('convergence', False):
-                    temp = result.get('temperature', 0)
-                    # 这里需要从实际的MD分析结果中提取扩散系数
-                    # 暂时使用模拟数据，实际应该从各温度子目录的分析结果中读取
-                    temp_dir = Path(result.get('subtask_dir', ''))
-                    if temp_dir.exists():
-                        try:
-                            # 模拟从MD分析中提取扩散系数（实际实现中应该调用MD分析器）
-                            diffusion_coeff = self._extract_diffusion_coefficient(temp_dir)
-                            if diffusion_coeff and diffusion_coeff > 0:
-                                valid_temps.append(temp)
-                                valid_diffusions.append(diffusion_coeff)
-                        except Exception as e:
-                            print(f"提取温度{temp}K扩散系数失败: {e}")
-            
-            # 执行Arrhenius分析（需要至少2个有效温度点）
-            if len(valid_temps) >= 2:
-                arrhenius_result = self._calculate_arrhenius_parameters(valid_temps, valid_diffusions)
-                analysis_results['arrhenius'] = arrhenius_result
-                
-                # 生成Arrhenius图
-                self._generate_arrhenius_plot(valid_temps, valid_diffusions, arrhenius_result, output_dir)
-            
-            analysis_results['diffusion_data'] = list(zip(valid_temps, valid_diffusions))
-            
-        except Exception as e:
-            print(f"多温度分析失败: {e}")
-        
-        return analysis_results
-    
-    def _extract_diffusion_coefficient(self, temp_dir: Path) -> Optional[float]:
-        """从温度子目录中提取扩散系数（简化实现）"""
-        try:
-            # 检查是否存在XDATCAR文件
-            xdatcar_path = temp_dir / "XDATCAR"
-            if not xdatcar_path.exists():
-                return None
-            
-            # 这里是简化实现，实际应该调用pymatgen的MD分析
-            # 返回模拟的扩散系数，实际应该通过MSD计算
-            import random
-            import numpy as np
-            temp = float(temp_dir.name.replace("T_", "").replace("K", ""))
-            # 模拟温度依赖的扩散系数 D = D0 * exp(-Ea/(kB*T))
-            base_diffusion = 1e-9 * np.exp(-0.5 / (8.617e-5 * temp))  # 假设Ea=0.5eV
-            return base_diffusion * (1 + random.uniform(-0.1, 0.1))  # 添加小的随机噪声
-            
-        except Exception as e:
-            print(f"提取扩散系数失败: {e}")
-            return None
-    
-    def _calculate_arrhenius_parameters(self, temperatures: List[float], diffusions: List[float]) -> Dict:
-        """计算Arrhenius参数"""
-        try:
-            import numpy as np
-            
-            T_array = np.array(temperatures)
-            D_array = np.array(diffusions)
-            
-            # Arrhenius方程: D = D0 * exp(-Ea/(kB*T))
-            # 线性化: ln(D) = ln(D0) - Ea/(kB*T)
-            x = 1.0 / T_array  # 1/T
-            y = np.log(D_array)  # ln(D)
-            
-            # 线性拟合
-            A = np.vstack([x, np.ones(len(x))]).T
-            slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
-            
-            # 计算拟合质量
-            y_pred = slope * x + intercept
-            ss_res = np.sum((y - y_pred) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-            
-            # 计算物理参数
-            KB_EV = 8.617e-5  # Boltzmann常数 (eV/K)
-            activation_energy = -slope * KB_EV  # 活化能 (eV)
-            pre_exponential = np.exp(intercept)  # 指前因子 D0
-            
-            return {
-                'activation_energy_eV': float(activation_energy),
-                'pre_exponential_factor': float(pre_exponential),
-                'r_squared': float(r_squared),
-                'slope': float(slope),
-                'intercept': float(intercept),
-                'temperature_range': f"{min(temperatures):.0f}K - {max(temperatures):.0f}K",
-                'data_points': len(temperatures)
-            }
-            
-        except Exception as e:
-            print(f"Arrhenius参数计算失败: {e}")
-            return {}
-    
-    def _generate_arrhenius_plot(self, temperatures: List[float], diffusions: List[float], arrhenius_result: Dict, output_dir: Path):
-        """生成Arrhenius图"""
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-            
-            fig, ax = plt.subplots(figsize=(10, 8))
-            
-            T_array = np.array(temperatures)
-            D_array = np.array(diffusions)
-            x = 1000.0 / T_array  # 1000/T for better scale
-            y = np.log10(D_array)  # log10(D)
-            
-            # 绘制数据点
-            ax.scatter(x, y, c='red', s=100, alpha=0.8, edgecolors='black', linewidth=1, 
-                      label='实验数据点', zorder=5)
-            
-            # 绘制拟合线
-            x_fit = np.linspace(x.min(), x.max(), 100)
-            slope_log10 = arrhenius_result['slope'] / np.log(10)  # 转换为log10尺度
-            intercept_log10 = arrhenius_result['intercept'] / np.log(10)
-            y_fit = slope_log10 * (x_fit * 1000) + intercept_log10
-            
-            ax.plot(x_fit, y_fit, 'b-', linewidth=2, alpha=0.8, 
-                   label=f'Arrhenius拟合 (R² = {arrhenius_result["r_squared"]:.3f})')
-            
-            # 设置标签和标题
-            ax.set_xlabel('1000/T (K⁻¹)', fontsize=12, fontweight='bold')
-            ax.set_ylabel('log₁₀(D) [D in m²/s]', fontsize=12, fontweight='bold')
-            ax.set_title(f'Arrhenius图\n活化能 = {arrhenius_result["activation_energy_eV"]:.3f} eV', 
-                        fontsize=14, fontweight='bold')
-            
-            # 网格和样式
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.legend(fontsize=11)
-            
-            # 添加文本框显示参数
-            textstr = f"""Arrhenius参数:
-Ea = {arrhenius_result["activation_energy_eV"]:.3f} eV
-D₀ = {arrhenius_result["pre_exponential_factor"]:.2e} m²/s
-R² = {arrhenius_result["r_squared"]:.3f}
-温度范围: {arrhenius_result["temperature_range"]}"""
-            
-            props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-                   verticalalignment='top', bbox=props)
-            
-            plt.tight_layout()
-            plt.savefig(output_dir / 'arrhenius_plot.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print("✅ Arrhenius图已生成")
-            
-        except Exception as e:
-            print(f"生成Arrhenius图失败: {e}")
-    
-    async def _generate_individual_temp_htmls(self, work_dir: Path, subtask_results: List[Dict], output_dir: Path) -> List[Dict]:
-        """为每个温度点生成单独的HTML分析报告"""
-        temp_htmls = []
-        
-        for result in subtask_results:
-            if not result.get('convergence', False):
-                continue
-                
-            temp = result.get('temperature', 0)
-            temp_dir = Path(result.get('subtask_dir', ''))
-            
-            try:
-                # 调用单温度MD分析（假设存在generate_md_analysis_report函数）
-                # 这里需要根据实际的MD分析器API进行调用
-                html_content = await self._generate_single_temp_html(temp_dir, temp)
-                
-                temp_htmls.append({
-                    'temperature': temp,
-                    'tab_id': f"temp_{int(temp)}K",
-                    'tab_label': f"{temp}K",
-                    'html_content': html_content
-                })
-                
-            except Exception as e:
-                print(f"生成温度{temp}K的HTML失败: {e}")
-        
-        return temp_htmls
-    
-    async def _generate_single_temp_html(self, temp_dir: Path, temperature: float) -> str:
-        """生成单个温度的简化HTML分析"""
-        try:
-            # 这里是简化的HTML生成，实际应该调用完整的MD分析器
-            xdatcar_path = temp_dir / "XDATCAR"
-            oszicar_path = temp_dir / "OSZICAR"
-            
-            md_steps = 0
-            final_energy = None
-            
-            # 读取基本信息
-            if xdatcar_path.exists():
-                try:
-                    with open(xdatcar_path, 'r') as f:
-                        content = f.read()
-                        md_steps = content.count("Direct configuration=")
-                except:
-                    pass
-            
-            if oszicar_path.exists():
-                try:
-                    with open(oszicar_path, 'r') as f:
-                        lines = f.readlines()
-                        for line in reversed(lines):
-                            if 'DAV:' in line or 'RMM:' in line:
-                                parts = line.strip().split()
-                                if len(parts) >= 3:
-                                    final_energy = float(parts[2])
-                                    break
-                except:
-                    pass
-            
-            html_content = f"""
-            <div class="single-temp-analysis">
-                <h3>🌡️ {temperature}K 温度点详细分析</h3>
-                
-                <div class="analysis-section">
-                    <h4>📊 基本信息</h4>
-                    <table class="info-table">
-                        <tr><td>计算温度</td><td>{temperature} K</td></tr>
-                        <tr><td>MD步数</td><td>{md_steps}</td></tr>
-                        <tr><td>最终能量</td><td>{final_energy:.6f} eV</td></tr>
-                        <tr><td>计算目录</td><td>{temp_dir.name}</td></tr>
-                    </table>
-                </div>
-                
-                <div class="analysis-section">
-                    <h4>📈 结构和动力学分析</h4>
-                    <p>注意：单温度计算不包含活化能和Arrhenius分析，这些需要多温度数据。</p>
-                    <ul>
-                        <li>轨迹文件: XDATCAR</li>
-                        <li>能量演化: OSZICAR</li>
-                        <li>结构分析: 可通过PyMatGen进行进一步处理</li>
-                    </ul>
-                </div>
-                
-                <div class="analysis-section">
-                    <h4>📁 文件信息</h4>
-                    <ul>
-                        <li>POSCAR: 初始结构</li>
-                        <li>XDATCAR: MD轨迹</li>
-                        <li>OSZICAR: 能量和压力数据</li>
-                        <li>OUTCAR: 详细输出信息</li>
-                    </ul>
-                </div>
-            </div>
-            """
-            
-            return html_content
-            
-        except Exception as e:
-            print(f"生成单温度HTML失败: {e}")
-            return f"<div>生成{temperature}K分析报告时出错: {e}</div>"
-    
-    def _build_comprehensive_html(self, task_id: str, subtask_results: List[Dict], 
-                                 analysis_results: Dict, temp_html_tabs: List[Dict], 
-                                 output_dir: Path) -> str:
-        """构建带标签页的综合HTML报告"""
-        from datetime import datetime
-        
-        # 计算统计信息
-        total_temps = len(subtask_results)
-        completed_count = sum(1 for r in subtask_results if r.get('convergence', False))
-        failed_count = total_temps - completed_count
-        success_rate = (completed_count / total_temps * 100) if total_temps > 0 else 0
-        
-        # Arrhenius分析结果
-        arrhenius_section = ""
-        if analysis_results.get('arrhenius'):
-            arr = analysis_results['arrhenius']
-            arrhenius_section = f"""
-                <div class="analysis-section">
-                    <h3>🔬 Arrhenius分析</h3>
-                    <div class="arrhenius-results">
-                        <div class="arrhenius-plot">
-                            <img src="arrhenius_plot.png" alt="Arrhenius图" style="max-width: 100%; height: auto;">
-                        </div>
-                        <div class="arrhenius-params">
-                            <h4>📊 分析参数</h4>
-                            <table class="params-table">
-                                <tr><td><strong>活化能 (Ea)</strong></td><td>{arr['activation_energy_eV']:.3f} eV</td></tr>
-                                <tr><td><strong>指前因子 (D₀)</strong></td><td>{arr['pre_exponential_factor']:.2e} m²/s</td></tr>
-                                <tr><td><strong>拟合质量 (R²)</strong></td><td>{arr['r_squared']:.3f}</td></tr>
-                                <tr><td><strong>温度范围</strong></td><td>{arr['temperature_range']}</td></tr>
-                                <tr><td><strong>数据点数</strong></td><td>{arr['data_points']}</td></tr>
-                            </table>
-                            
-                            <div class="arrhenius-equation">
-                                <h4>📐 Arrhenius方程</h4>
-                                <p><strong>D = D₀ × exp(-Ea / kBT)</strong></p>
-                                <p>其中：</p>
-                                <ul>
-                                    <li>D: 扩散系数 (m²/s)</li>
-                                    <li>D₀: 指前因子 = {arr['pre_exponential_factor']:.2e} m²/s</li>
-                                    <li>Ea: 活化能 = {arr['activation_energy_eV']:.3f} eV</li>
-                                    <li>kB: 玻尔兹曼常数 = 8.617×10⁻⁵ eV/K</li>
-                                    <li>T: 温度 (K)</li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            """
-        else:
-            arrhenius_section = """
-                <div class="analysis-section">
-                    <h3>🔬 Arrhenius分析</h3>
-                    <p class="warning">⚠️ Arrhenius分析需要至少2个成功的温度点，当前成功的温度点不足。</p>
-                </div>
-            """
-        
-        # 构建标签页
-        tab_headers = ""
-        tab_contents = ""
-        
-        for i, tab in enumerate(temp_html_tabs):
-            active_class = "active" if i == 0 else ""
-            tab_headers += f"""
-                <button class="tab-button {active_class}" onclick="openTab(event, '{tab['tab_id']}')">{tab['tab_label']}</button>
-            """
-            
-            tab_contents += f"""
-                <div id="{tab['tab_id']}" class="tab-content {active_class}">
-                    {tab['html_content']}
-                </div>
-            """
-        
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>综合多温度MD分析报告 - {task_id}</title>
-    <style>
-        body {{ 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            margin: 0; 
-            padding: 20px; 
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            line-height: 1.6;
-        }}
-        
-        .container {{ 
-            max-width: 1400px; 
-            margin: 0 auto; 
-            background: white; 
-            border-radius: 15px; 
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }}
-        
-        .header {{ 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; 
-            text-align: center; 
-            padding: 30px 20px;
-        }}
-        
-        .header h1 {{ 
-            margin: 0; 
-            font-size: 2.5em; 
-            font-weight: 300;
-        }}
-        
-        .header p {{ 
-            margin: 10px 0 0 0; 
-            opacity: 0.9; 
-            font-size: 1.1em;
-        }}
-        
-        .main-content {{ 
-            padding: 30px;
-        }}
-        
-        .summary {{ 
-            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
-            padding: 25px; 
-            border-radius: 10px; 
-            margin-bottom: 30px;
-            color: #2c3e50;
-        }}
-        
-        .summary h2 {{ 
-            margin-top: 0; 
-            color: #2c3e50;
-        }}
-        
-        .stats-grid {{ 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-            gap: 20px; 
-            margin: 20px 0;
-        }}
-        
-        .stat-card {{ 
-            background: rgba(255,255,255,0.9); 
-            padding: 15px; 
-            border-radius: 8px; 
-            text-align: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        
-        .progress-bar {{ 
-            background: rgba(255,255,255,0.3); 
-            height: 20px; 
-            border-radius: 10px; 
-            overflow: hidden; 
-            margin: 15px 0;
-        }}
-        
-        .progress-fill {{ 
-            background: linear-gradient(90deg, #11998e, #38ef7d); 
-            height: 100%; 
-            transition: width 0.3s;
-        }}
-        
-        .analysis-section {{ 
-            background: #f8f9fa; 
-            margin: 20px 0; 
-            padding: 25px; 
-            border-radius: 10px;
-            border-left: 4px solid #007bff;
-        }}
-        
-        .analysis-section h3 {{ 
-            margin-top: 0; 
-            color: #007bff;
-        }}
-        
-        .arrhenius-results {{ 
-            display: grid; 
-            grid-template-columns: 1fr 1fr; 
-            gap: 30px; 
-            margin-top: 20px;
-        }}
-        
-        .params-table {{ 
-            width: 100%; 
-            border-collapse: collapse; 
-            margin: 15px 0;
-        }}
-        
-        .params-table td {{ 
-            padding: 10px; 
-            border-bottom: 1px solid #dee2e6;
-        }}
-        
-        .params-table td:first-child {{ 
-            background: #f8f9fa; 
-            font-weight: 500;
-            width: 40%;
-        }}
-        
-        .arrhenius-equation {{ 
-            background: #e7f3ff; 
-            padding: 20px; 
-            border-radius: 8px; 
-            margin-top: 20px;
-        }}
-        
-        .arrhenius-equation p {{ 
-            margin: 10px 0;
-        }}
-        
-        .arrhenius-equation ul {{ 
-            margin: 10px 0; 
-            padding-left: 20px;
-        }}
-        
-        .tabs {{ 
-            margin-top: 30px;
-        }}
-        
-        .tab-header {{ 
-            display: flex; 
-            background: #f1f3f4; 
-            border-radius: 10px 10px 0 0; 
-            overflow: hidden;
-            flex-wrap: wrap;
-        }}
-        
-        .tab-button {{ 
-            background: none; 
-            border: none; 
-            padding: 15px 25px; 
-            cursor: pointer; 
-            font-size: 16px; 
-            transition: all 0.3s;
-            flex: 1;
-            min-width: 120px;
-        }}
-        
-        .tab-button:hover {{ 
-            background: rgba(0,123,255,0.1);
-        }}
-        
-        .tab-button.active {{ 
-            background: #007bff; 
-            color: white; 
-            font-weight: 500;
-        }}
-        
-        .tab-content {{ 
-            display: none; 
-            background: white; 
-            padding: 30px; 
-            border-radius: 0 0 10px 10px;
-            border: 1px solid #f1f3f4;
-            border-top: none;
-        }}
-        
-        .tab-content.active {{ 
-            display: block;
-        }}
-        
-        .single-temp-analysis h3 {{ 
-            color: #495057; 
-            border-bottom: 2px solid #e9ecef; 
-            padding-bottom: 10px;
-        }}
-        
-        .single-temp-analysis h4 {{ 
-            color: #6c757d; 
-            margin-top: 25px;
-        }}
-        
-        .info-table {{ 
-            width: 100%; 
-            border-collapse: collapse; 
-            margin: 15px 0;
-        }}
-        
-        .info-table td {{ 
-            padding: 12px; 
-            border-bottom: 1px solid #dee2e6;
-        }}
-        
-        .info-table td:first-child {{ 
-            background: #f8f9fa; 
-            font-weight: 500; 
-            width: 30%;
-        }}
-        
-        .warning {{ 
-            background: #fff3cd; 
-            color: #856404; 
-            padding: 15px; 
-            border-radius: 5px; 
-            border-left: 4px solid #ffc107;
-        }}
-        
-        @media (max-width: 768px) {{
-            .arrhenius-results {{ 
-                grid-template-columns: 1fr;
-            }}
-            
-            .stats-grid {{ 
-                grid-template-columns: 1fr 1fr;
-            }}
-            
-            .tab-button {{ 
-                font-size: 14px; 
-                padding: 12px 15px;
-            }}
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🌡️ 综合多温度MD分析报告</h1>
-            <p>任务ID: {task_id} | 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-        
-        <div class="main-content">
-            <div class="summary">
-                <h2>📊 计算总结</h2>
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <h3>{total_temps}</h3>
-                        <p>总温度点数</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3 style="color: #28a745;">{completed_count}</h3>
-                        <p>成功计算</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3 style="color: #dc3545;">{failed_count}</h3>
-                        <p>失败计算</p>
-                    </div>
-                    <div class="stat-card">
-                        <h3>{success_rate:.1f}%</h3>
-                        <p>成功率</p>
-                    </div>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width: {success_rate}%;"></div>
-                </div>
-            </div>
-            
-            {arrhenius_section}
-            
-            <div class="analysis-section">
-                <h3>📋 多温度分析说明</h3>
-                <ul>
-                    <li><strong>活化能分析</strong>: 通过多温度数据拟合Arrhenius方程，获得扩散过程的活化能</li>
-                    <li><strong>温度依赖性</strong>: 研究扩散系数随温度的变化规律</li>
-                    <li><strong>数据质量</strong>: R²值越接近1，表示拟合质量越好</li>
-                    <li><strong>物理意义</strong>: 活化能反映了离子在材料中扩散所需克服的能垒</li>
-                </ul>
-            </div>
-            
-            <div class="tabs">
-                <h2>🔍 各温度点详细分析</h2>
-                <div class="tab-header">
-                    {tab_headers}
-                </div>
-                {tab_contents}
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        function openTab(evt, tabId) {{
-            var i, tabContent, tabButtons;
-            
-            // 隐藏所有标签页内容
-            tabContent = document.getElementsByClassName("tab-content");
-            for (i = 0; i < tabContent.length; i++) {{
-                tabContent[i].classList.remove("active");
-            }}
-            
-            // 移除所有按钮的active类
-            tabButtons = document.getElementsByClassName("tab-button");
-            for (i = 0; i < tabButtons.length; i++) {{
-                tabButtons[i].classList.remove("active");
-            }}
-            
-            // 显示选中的标签页并设置按钮为active
-            document.getElementById(tabId).classList.add("active");
-            evt.currentTarget.classList.add("active");
-        }}
-    </script>
-</body>
-</html>
-        """
-        
-        return html_content 
 
+    # ================================================================== #
+    #  NEB 计算
+    # ================================================================== #
+
+    async def run_neb_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """运行 NEB（过渡态）计算"""
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if progress_callback:
+                await progress_callback(5, "准备 NEB 初始/终态结构...")
+
+            # 1. 获取初始和终态 POSCAR
+            initial_poscar, final_poscar = await self._prepare_neb_endpoints(work_dir, params, progress_callback)
+
+            # 2. 生成中间图像
+            if progress_callback:
+                await progress_callback(20, "生成 NEB 中间图像...")
+            await self._generate_neb_images(work_dir, initial_poscar, final_poscar, params)
+
+            # 3. 生成 INCAR / KPOINTS / POTCAR
+            if progress_callback:
+                await progress_callback(30, "生成 NEB VASP 输入文件...")
+            await self._generate_neb_inputs(work_dir, params)
+
+            # 4. 运行 VASP
+            if progress_callback:
+                await progress_callback(40, "开始 VASP NEB 计算...")
+            result = await self._run_vasp_calculation(work_dir, progress_callback)
+
+            # 5. 分析结果
+            if progress_callback:
+                await progress_callback(90, "分析 NEB 计算结果...")
+            final_result = await self._analyze_neb_results(work_dir, result)
+
+            if progress_callback:
+                await progress_callback(100, "NEB 计算完成!")
+            return final_result
+
+        except Exception as e:
+            error_msg = f"NEB 计算失败: {str(e)}"
+            logger.error(error_msg)
+            logger.error("详细错误: %s", traceback.format_exc())
+            raise Exception(error_msg)
+
+    async def _prepare_neb_endpoints(self, work_dir: Path, params: Dict[str, Any], progress_callback=None):
+        """获取 NEB 初始结构和终态结构，返回 (initial_poscar_path, final_poscar_path)。"""
+        from .base import generate_potcar
+
+        async def _get_poscar(task_id_key: str, formula_key: str, cif_url_key: str, dest_name: str) -> str:
+            """从 task_id / formula / cif_url 中获取 POSCAR，保存为 dest_name。"""
+            task_id_val = params.get(task_id_key)
+            formula_val = params.get(formula_key)
+            cif_url_val = params.get(cif_url_key)
+            dest = work_dir / dest_name
+
+            if task_id_val:
+                src_dir = self.base_work_dir / task_id_val
+                # 优先使用 CONTCAR（优化后结构），回退 POSCAR
+                for fname in ("CONTCAR", "POSCAR"):
+                    src = src_dir / fname
+                    if src.exists():
+                        shutil.copy(str(src), str(dest))
+                        logger.info("NEB 端点结构来自 %s/%s", task_id_val, fname)
+                        return str(dest)
+                raise Exception(f"任务 {task_id_val} 中未找到 POSCAR 或 CONTCAR")
+
+            tmp_dir = work_dir / f"_tmp_{dest_name}"
+            tmp_dir.mkdir(exist_ok=True)
+            tmp_params = dict(params)
+            if formula_val:
+                tmp_params['formula'] = formula_val
+                tmp_params.pop('cif_url', None)
+            elif cif_url_val:
+                tmp_params['cif_url'] = cif_url_val
+                tmp_params.pop('formula', None)
+            else:
+                raise Exception(f"必须提供 {task_id_key}、{formula_key} 或 {cif_url_key}")
+
+            cif_path = await self._get_cif_file(tmp_dir, tmp_params, None)
+            if not cif_path:
+                raise Exception(f"无法获取 {dest_name} 的 CIF 文件")
+            poscar_path = await self._convert_cif_to_poscar(cif_path, tmp_dir, tmp_params)
+            shutil.copy(poscar_path, str(dest))
+            shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            return str(dest)
+
+        initial_poscar = await _get_poscar("initial_task_id", "initial_formula", "initial_cif_url", "POSCAR_initial")
+        final_poscar = await _get_poscar("final_task_id", "final_formula", "final_cif_url", "POSCAR_final")
+        return initial_poscar, final_poscar
+
+    async def _generate_neb_images(self, work_dir: Path, initial_poscar: str, final_poscar: str, params: Dict[str, Any]):
+        """使用 pymatgen 线性插值生成中间图像，写入数字命名子目录。"""
+        from pymatgen.core import Structure
+
+        n_images = int(params.get('n_images', 5))
+        initial = Structure.from_file(initial_poscar)
+        final = Structure.from_file(final_poscar)
+
+        # interpolate 返回 n_images+2 个结构（含端点）
+        images = initial.interpolate(final, nimages=n_images + 1, autosort_tol=0.5)
+
+        for i, img in enumerate(images):
+            img_dir = work_dir / f"{i:02d}"
+            img_dir.mkdir(exist_ok=True)
+            poscar_out = img_dir / "POSCAR"
+            img.to(fmt="poscar", filename=str(poscar_out))
+            logger.info("NEB 图像 %02d 已写入: %s", i, poscar_out)
+
+        logger.info("共生成 %d 个图像（含端点）", len(images))
+
+    async def _generate_neb_inputs(self, work_dir: Path, params: Dict[str, Any]):
+        """生成 NEB 计算所需的 INCAR、KPOINTS、POTCAR（POTCAR 复制到各子目录）。"""
+        from .base import generate_potcar, generate_kpoints
+
+        n_images = int(params.get('n_images', 5))
+
+        # POSCAR 放 00/ 中，用于生成 POTCAR
+        poscar_00 = work_dir / "00" / "POSCAR"
+        if not poscar_00.exists():
+            raise Exception("NEB 图像目录 00/POSCAR 不存在")
+        shutil.copy(str(poscar_00), str(work_dir / "POSCAR"))
+
+        # 生成 POTCAR 和 KPOINTS 到 work_dir
+        generate_potcar(str(work_dir))
+        generate_kpoints(str(work_dir))
+
+        # 将 POTCAR 复制到每个图像子目录
+        potcar_src = work_dir / "POTCAR"
+        for i in range(n_images + 2):
+            img_dir = work_dir / f"{i:02d}"
+            if img_dir.exists():
+                shutil.copy(str(potcar_src), str(img_dir / "POTCAR"))
+
+        # 生成 NEB INCAR
+        incar_path = work_dir / "INCAR"
+        with open(incar_path, 'w') as f:
+            f.write(f"""SYSTEM = NEB
+ICHAIN = 0
+IMAGES = {n_images}
+SPRING = -5
+LCLIMB = .TRUE.
+IBRION = 3
+NSW = 500
+POTIM = 0.5
+EDIFF = 1E-4
+EDIFFG = -0.05
+ISIF = 2
+ISYM = 0
+ENCUT = 520
+PREC = Normal
+ISMEAR = 0
+SIGMA = 0.05
+LWAVE = .FALSE.
+LCHARG = .FALSE.
+ISPIN = 2
+GGA = PE
+LREAL = Auto
+""")
+        await self._apply_custom_incar(work_dir, params)
+        logger.info("NEB 输入文件已生成（IMAGES=%d）", n_images)
+
+    async def _analyze_neb_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
+        """分析 NEB 计算结果，生成 HTML 报告。"""
+        try:
+            html_report_path = None
+            neb_data = {}
+            try:
+                from .analyzers.neb import NEBAnalyzer, generate_neb_report
+                analyzer = NEBAnalyzer(str(work_dir), task_id="neb")
+                analysis_data = analyzer.analyze()
+                neb_data = analysis_data.get('neb', {})
+                html_report_path = generate_neb_report(str(work_dir), task_id="neb")
+                logger.info("NEB 分析报告已生成: %s", html_report_path)
+            except Exception as e:
+                logger.warning("生成 NEB 报告失败: %s", e)
+
+            result = {
+                'success': vasp_result.get('success', False),
+                'forward_barrier_eV': neb_data.get('forward_barrier_eV'),
+                'backward_barrier_eV': neb_data.get('backward_barrier_eV'),
+                'reaction_energy_eV': neb_data.get('reaction_energy_eV'),
+                'n_images': neb_data.get('n_images'),
+                'ts_image_index': neb_data.get('ts_image_index'),
+                'computation_time': vasp_result.get('computation_time'),
+                'work_directory': str(work_dir),
+            }
+            if html_report_path:
+                result['neb_report_html_path'] = get_static_url(html_report_path)
+            return result
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"NEB 结果分析失败: {str(e)}",
+                'work_directory': str(work_dir),
+            }
+
+    # ================================================================== #
+    #  Phonon 计算
+    # ================================================================== #
+
+    async def run_phonon_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """运行声子计算（IBRION=6 有限位移+对称性，Gamma 点）"""
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if progress_callback:
+                await progress_callback(5, "准备声子计算结构文件...")
+
+            # 1. 获取结构文件
+            await self._prepare_phonon_files(work_dir, params, progress_callback)
+
+            # 2. 生成 INCAR / KPOINTS
+            if progress_callback:
+                await progress_callback(25, "生成声子计算 VASP 输入文件...")
+            await self._generate_phonon_inputs(work_dir, params)
+
+            # 3. 运行 VASP
+            if progress_callback:
+                await progress_callback(35, "开始 VASP 声子计算...")
+            result = await self._run_vasp_calculation(work_dir, progress_callback)
+
+            # 4. 分析结果
+            if progress_callback:
+                await progress_callback(90, "分析声子计算结果...")
+            final_result = await self._analyze_phonon_results(work_dir, result)
+
+            if progress_callback:
+                await progress_callback(100, "声子计算完成!")
+            return final_result
+
+        except Exception as e:
+            error_msg = f"声子计算失败: {str(e)}"
+            logger.error(error_msg)
+            logger.error("详细错误: %s", traceback.format_exc())
+            raise Exception(error_msg)
+
+    async def _prepare_phonon_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None):
+        """为声子计算准备 POSCAR 和 POTCAR。"""
+        from .base import generate_potcar
+
+        if params.get('scf_task_id'):
+            if progress_callback:
+                await progress_callback(15, "从 SCF 任务获取结构文件...")
+            scf_dir = self.base_work_dir / params['scf_task_id']
+            for fname in ("POSCAR", "POTCAR"):
+                src = scf_dir / fname
+                if fname == "POTCAR" and not src.exists():
+                    # POTCAR 由 CONTCAR/POSCAR 重新生成
+                    continue
+                if not src.exists():
+                    raise Exception(f"SCF 任务 {params['scf_task_id']} 中缺少 {fname}")
+                shutil.copy(str(src), str(work_dir / fname))
+            # 优先使用优化后的 CONTCAR 作为 POSCAR
+            contcar = scf_dir / "CONTCAR"
+            if contcar.exists():
+                shutil.copy(str(contcar), str(work_dir / "POSCAR"))
+            if not (work_dir / "POTCAR").exists():
+                generate_potcar(str(work_dir))
+
+        elif params.get('formula') or params.get('cif_url'):
+            if progress_callback:
+                await progress_callback(10, "获取 CIF 结构文件...")
+            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
+            if not cif_path:
+                raise Exception("无法获取 CIF 文件")
+            await self._convert_cif_to_poscar(cif_path, work_dir, params)
+            generate_potcar(str(work_dir))
+        else:
+            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+
+    async def _generate_phonon_inputs(self, work_dir: Path, params: Dict[str, Any]):
+        """生成声子计算 INCAR 和 KPOINTS。"""
+        from .base import generate_kpoints
+
+        displacement = float(params.get('displacement', 0.015))
+        kpoint_density = float(params.get('kpoint_density', 30.0))
+
+        # KPOINTS（普通 Monkhorst-Pack，声子不需要高密度）
+        generate_kpoints(str(work_dir))
+
+        incar_path = work_dir / "INCAR"
+        with open(incar_path, 'w') as f:
+            f.write(f"""SYSTEM = Phonon
+IBRION = 6
+NSW = 1
+NFREE = 2
+POTIM = {displacement}
+EDIFF = 1E-8
+ENCUT = 520
+PREC = Accurate
+ISMEAR = 0
+SIGMA = 0.01
+LREAL = .FALSE.
+ADDGRID = .TRUE.
+LWAVE = .FALSE.
+LCHARG = .FALSE.
+ISPIN = 2
+GGA = PE
+""")
+        await self._apply_custom_incar(work_dir, params)
+        logger.info("声子计算 INCAR 已生成（displacement=%.4f Å）", displacement)
+
+    async def _analyze_phonon_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
+        """分析声子计算结果，生成 HTML 报告。"""
+        try:
+            html_report_path = None
+            phonon_data = {}
+            try:
+                from .analyzers.phonon import PhononAnalyzer, generate_phonon_report
+                analyzer = PhononAnalyzer(str(work_dir), task_id="phonon")
+                analysis_data = analyzer.analyze()
+                phonon_data = analysis_data.get('phonon', {})
+                html_report_path = generate_phonon_report(str(work_dir), task_id="phonon")
+                logger.info("声子分析报告已生成: %s", html_report_path)
+            except Exception as e:
+                logger.warning("生成声子报告失败: %s", e)
+
+            result = {
+                'success': vasp_result.get('success', False),
+                'n_modes': phonon_data.get('n_modes'),
+                'n_imaginary': phonon_data.get('n_imaginary'),
+                'dynamically_stable': phonon_data.get('dynamically_stable'),
+                'max_imaginary_freq_cm1': phonon_data.get('max_imaginary_freq_cm1'),
+                'max_real_freq_cm1': phonon_data.get('max_real_freq_cm1'),
+                'min_real_freq_cm1': phonon_data.get('min_real_freq_cm1'),
+                'computation_time': vasp_result.get('computation_time'),
+                'work_directory': str(work_dir),
+            }
+            if html_report_path:
+                result['phonon_report_html_path'] = get_static_url(html_report_path)
+            return result
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"声子结果分析失败: {str(e)}",
+                'work_directory': str(work_dir),
+            }
+
+    # ================================================================== #
+    #  通用自定义计算
+    # ================================================================== #
+
+    async def run_custom_calculation(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """运行通用自定义 VASP 计算 — 用户完全控制 INCAR"""
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if progress_callback:
+                await progress_callback(5, "准备结构文件...")
+            await self._prepare_custom_structure(work_dir, params, progress_callback)
+
+            if progress_callback:
+                await progress_callback(15, "生成POTCAR...")
+            from .base import generate_potcar
+            generate_potcar(str(work_dir))
+
+            if progress_callback:
+                await progress_callback(18, "生成KPOINTS...")
+            await self._generate_custom_kpoints(work_dir, params)
+
+            if progress_callback:
+                await progress_callback(20, "写入INCAR...")
+            await self._write_custom_incar(work_dir, params)
+
+            if progress_callback:
+                await progress_callback(30, "提交VASP计算...")
+            result = await self._run_vasp_calculation(work_dir, progress_callback)
+
+            if progress_callback:
+                await progress_callback(90, "分析计算结果...")
+            final_result = await self._analyze_custom_results(work_dir, result)
+            final_result['work_directory'] = str(work_dir)
+
+            if progress_callback:
+                await progress_callback(100, "计算完成！")
+            return final_result
+
+        except Exception as e:
+            error_msg = f"自定义计算失败: {str(e)}"
+            logger.error(error_msg)
+            logger.error("详细错误信息: %s", traceback.format_exc())
+            raise Exception(error_msg)
+
+    async def _prepare_custom_structure(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> None:
+        """为自定义计算准备 POSCAR（优先 CONTCAR）"""
+        if params.get('from_task_id'):
+            src_dir = self.base_work_dir / params['from_task_id']
+            for fname in ("CONTCAR", "POSCAR"):
+                src = src_dir / fname
+                if src.exists() and src.stat().st_size > 0:
+                    shutil.copy(str(src), str(work_dir / "POSCAR"))
+                    logger.info("复制 %s → POSCAR（来自任务 %s）", fname, params['from_task_id'])
+                    return
+            raise Exception(f"任务 {params['from_task_id']} 中未找到有效的 CONTCAR 或 POSCAR")
+
+        cif_path = await self._get_cif_file(work_dir, params, progress_callback)
+        if not cif_path:
+            raise Exception("无法获取 CIF 文件")
+        await self._convert_cif_to_poscar(cif_path, work_dir, params)
+
+    async def _generate_custom_kpoints(self, work_dir: Path, params: Dict[str, Any]) -> None:
+        """生成 K 点文件（mesh 或 gamma）"""
+        mode = params.get('kpoint_mode', 'mesh').lower()
+        if mode == 'gamma':
+            kpoints_content = "Automatic mesh\n0\nGamma\n1 1 1\n0.0 0.0 0.0\n"
+            with open(work_dir / "KPOINTS", 'w') as f:
+                f.write(kpoints_content)
+            logger.info("自定义KPOINTS: Gamma-only (1×1×1)")
+        else:
+            from .base import generate_kpoints
+            generate_kpoints(str(work_dir))
+            logger.info("自定义KPOINTS: MP网格（密度 %.1f）", params.get('kpoint_density', 30.0))
+
+    async def _write_custom_incar(self, work_dir: Path, params: Dict[str, Any]) -> None:
+        """将用户提供的 incar 字典直接写入 INCAR 文件"""
+        incar_dict = dict(params.get('incar', {}))
+        incar_dict.setdefault('SYSTEM', 'CUSTOM')
+
+        lines = []
+        for key, value in incar_dict.items():
+            k = key.upper()
+            if isinstance(value, bool):
+                v = '.TRUE.' if value else '.FALSE.'
+            elif isinstance(value, float) and abs(value) != 0 and abs(value) < 1e-3:
+                v = f'{value:.2E}'
+            else:
+                v = str(value)
+            lines.append(f"{k} = {v}\n")
+
+        with open(work_dir / "INCAR", 'w') as f:
+            f.writelines(lines)
+        logger.info("自定义INCAR已写入 %s（%d 个参数）", work_dir / "INCAR", len(incar_dict))
+
+    async def _analyze_custom_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
+        """从 OUTCAR 提取通用结果摘要"""
+        import re
+        result: Dict[str, Any] = {
+            'success': False,
+            'convergence': False,
+            'final_energy': None,
+            'fermi_energy': None,
+            'n_ionic_steps': None,
+            'n_electronic_steps': None,
+            'output_files': [],
+            'computation_time': vasp_result.get('computation_time'),
+            'process_id': vasp_result.get('process_id'),
+        }
+
+        if not vasp_result.get('success', False):
+            result['error'] = vasp_result.get('error_message', 'VASP计算失败')
+            return result
+
+        outcar_path = work_dir / "OUTCAR"
+        if not outcar_path.exists():
+            result['error'] = "未找到OUTCAR文件"
+            return result
+
+        try:
+            with open(outcar_path, 'r', errors='ignore') as f:
+                content = f.read()
+
+            result['convergence'] = 'General timing and accounting informations for this job:' in content
+            result['success'] = result['convergence']
+            result['final_energy'] = self._extract_energy(outcar_path)
+
+            fermi_match = re.search(r'E-fermi\s*:\s*([-\d.]+)', content)
+            if fermi_match:
+                result['fermi_energy'] = float(fermi_match.group(1))
+
+            ionic_steps = len(re.findall(r'Iteration\s+\d+\(\s*1\)', content))
+            result['n_ionic_steps'] = ionic_steps if ionic_steps > 0 else None
+
+            elec_matches = re.findall(r'Iteration\s+\d+\(\s*(\d+)\)', content)
+            if elec_matches:
+                result['n_electronic_steps'] = int(elec_matches[-1])
+
+        except Exception as e:
+            logger.warning("分析自定义计算OUTCAR时出错: %s", e)
+
+        for fname in ("OUTCAR", "CONTCAR", "POSCAR", "EIGENVAL", "DOSCAR",
+                      "CHGCAR", "WAVECAR", "PROCAR", "LOCPOT", "vasprun.xml"):
+            if (work_dir / fname).exists():
+                result['output_files'].append(fname)
+
+        return result
