@@ -1,8 +1,13 @@
 import asyncio
+import json
+import logging
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+import requests
 
 from .settings import settings
 from .vasp_worker import VaspWorker
@@ -23,6 +28,9 @@ TASK_TYPE_TO_METHOD = {
 
 class TaskCanceled(Exception):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 class PullWorker:
@@ -53,7 +61,18 @@ class PullWorker:
             time.sleep(self.poll_interval_seconds)
 
     def run_once(self) -> bool:
-        task = self.control_plane_client.claim()
+        if not self._drain_pending_completions():
+            return False
+
+        try:
+            task = self._call_control_plane_with_retries(
+                "claim",
+                self.control_plane_client.claim,
+            )
+        except Exception as exc:
+            logger.warning("worker %s claim failed after retries: %s", self.worker_id, exc)
+            return False
+
         if not task:
             return False
 
@@ -69,45 +88,51 @@ class PullWorker:
             nonlocal scheduler_job_id, cancel_requested
             if pid is not None:
                 scheduler_job_id = str(pid)
-            heartbeat = self.control_plane_client.heartbeat(task_id, lease_token)
+            heartbeat = self._call_control_plane_with_retries(
+                "heartbeat",
+                lambda: self.control_plane_client.heartbeat(task_id, lease_token),
+            )
             if heartbeat.get("cancel_requested"):
                 cancel_requested = True
             if cancel_requested and scheduler_job_id:
                 subprocess.run(["scancel", scheduler_job_id], check=False)
-                self.control_plane_client.cancel_ack(task_id, lease_token)
+                self._ack_cancel(task_id, lease_token)
                 raise TaskCanceled(message)
             if cancel_requested and pid is None:
                 return
             if cancel_requested:
                 if scheduler_job_id:
                     subprocess.run(["scancel", scheduler_job_id], check=False)
-                    self.control_plane_client.cancel_ack(task_id, lease_token)
+                    self._ack_cancel(task_id, lease_token)
                 raise TaskCanceled(message)
 
         try:
-            self.control_plane_client.mark_running(task_id, lease_token)
+            self._call_control_plane_with_retries(
+                "mark_running",
+                lambda: self.control_plane_client.mark_running(task_id, lease_token),
+            )
             result = self._run_task(task_type, task_id, params, progress_callback)
             if cancel_requested:
-                self.control_plane_client.cancel_ack(task_id, lease_token)
+                self._ack_cancel(task_id, lease_token)
                 return True
             if not self._is_success(task_type, result):
                 payload = {
                     "error_message": result.get("error") or result.get("error_message") or "任务执行失败",
                     "artifact_manifest": self._collect_artifact_manifest(result.get("work_directory")),
                 }
-                self.control_plane_client.fail(task_id, lease_token, payload)
+                self._report_failure(task_id, lease_token, payload)
                 return True
 
             payload = {
                 "result_data": result,
                 "artifact_manifest": self._collect_artifact_manifest(result.get("work_directory")),
             }
-            self.control_plane_client.complete(task_id, lease_token, payload)
+            self._report_completion(task_id, lease_token, payload)
             return True
         except TaskCanceled:
             return True
         except Exception as exc:
-            self.control_plane_client.fail(
+            self._report_failure(
                 task_id,
                 lease_token,
                 {
@@ -131,6 +156,174 @@ class PullWorker:
         if task_type == "md_calculation" and result.get("convergence"):
             return True
         return False
+
+    def _call_control_plane_with_retries(
+        self,
+        operation_name: str,
+        func,
+        attempts: Optional[int] = None,
+    ):
+        retry_attempts = attempts or settings.worker_control_plane_retry_attempts
+        last_error: Optional[Exception] = None
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                return func()
+            except Exception as exc:
+                last_error = exc
+                if not self._is_retryable_control_plane_error(exc) or attempt >= retry_attempts:
+                    break
+                delay_seconds = self._retry_delay_seconds(attempt)
+                logger.warning(
+                    "worker %s %s failed on attempt %s/%s: %s; retrying in %.1fs",
+                    self.worker_id,
+                    operation_name,
+                    attempt,
+                    retry_attempts,
+                    exc,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+        assert last_error is not None
+        raise last_error
+
+    def _is_retryable_control_plane_error(self, exc: Exception) -> bool:
+        if isinstance(exc, requests.exceptions.HTTPError):
+            response = getattr(exc, "response", None)
+            if response is None:
+                return True
+            return response.status_code in {408, 429, 500, 502, 503, 504}
+        return isinstance(
+            exc,
+            (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException,
+                OSError,
+            ),
+        )
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        base = settings.worker_control_plane_retry_backoff_seconds
+        max_delay = settings.worker_control_plane_retry_max_backoff_seconds
+        return min(base * (2 ** (attempt - 1)), max_delay)
+
+    def _ack_cancel(self, task_id: str, lease_token: str) -> bool:
+        try:
+            self._call_control_plane_with_retries(
+                "cancel_ack",
+                lambda: self.control_plane_client.cancel_ack(task_id, lease_token),
+                attempts=settings.worker_control_plane_final_retry_attempts,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("worker %s failed to acknowledge cancel for task %s: %s", self.worker_id, task_id, exc)
+            return False
+
+    def _report_completion(self, task_id: str, lease_token: str, payload: dict[str, Any]) -> bool:
+        pending_path = self._write_pending_completion(task_id, lease_token, payload)
+        try:
+            self._call_control_plane_with_retries(
+                "complete",
+                lambda: self.control_plane_client.complete(task_id, lease_token, payload),
+                attempts=settings.worker_control_plane_final_retry_attempts,
+            )
+        except Exception as exc:
+            logger.warning(
+                "worker %s failed to report completion for task %s after retries; completion payload kept at %s: %s",
+                self.worker_id,
+                task_id,
+                pending_path,
+                exc,
+            )
+            return False
+        self._delete_pending_file(pending_path)
+        return True
+
+    def _report_failure(self, task_id: str, lease_token: str, payload: dict[str, Any]) -> bool:
+        try:
+            self._call_control_plane_with_retries(
+                "fail",
+                lambda: self.control_plane_client.fail(task_id, lease_token, payload),
+                attempts=settings.worker_control_plane_final_retry_attempts,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("worker %s failed to report failure for task %s after retries: %s", self.worker_id, task_id, exc)
+            return False
+
+    def _pending_completion_dir(self) -> Path:
+        preferred_dir = Path(settings.vasp_work_root) / ".control-plane-pending" / self.worker_id
+        try:
+            preferred_dir.mkdir(parents=True, exist_ok=True)
+            return preferred_dir
+        except OSError:
+            fallback_dir = Path(tempfile.gettempdir()) / "mcp-ic-tool-control-plane-pending" / self.worker_id
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            logger.warning(
+                "worker %s could not use pending completion dir %s; falling back to %s",
+                self.worker_id,
+                preferred_dir,
+                fallback_dir,
+            )
+            return fallback_dir
+
+    def _write_pending_completion(self, task_id: str, lease_token: str, payload: dict[str, Any]) -> Path:
+        pending_dir = self._pending_completion_dir()
+        pending_path = pending_dir / f"{task_id}.json"
+        pending_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "lease_token": lease_token,
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return pending_path
+
+    def _drain_pending_completions(self) -> bool:
+        pending_dir = self._pending_completion_dir()
+        if not pending_dir.exists():
+            return True
+
+        for pending_path in sorted(pending_dir.glob("*.json")):
+            try:
+                record = json.loads(pending_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("worker %s dropping unreadable pending completion %s: %s", self.worker_id, pending_path, exc)
+                self._delete_pending_file(pending_path)
+                continue
+
+            try:
+                self._call_control_plane_with_retries(
+                    "complete",
+                    lambda: self.control_plane_client.complete(
+                        record["task_id"],
+                        record["lease_token"],
+                        record["payload"],
+                    ),
+                    attempts=settings.worker_control_plane_final_retry_attempts,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "worker %s could not replay pending completion %s yet: %s",
+                    self.worker_id,
+                    pending_path,
+                    exc,
+                )
+                return False
+            self._delete_pending_file(pending_path)
+
+        return True
+
+    @staticmethod
+    def _delete_pending_file(pending_path: Path) -> None:
+        try:
+            pending_path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("failed to delete pending completion file %s", pending_path, exc_info=True)
 
     def _collect_artifact_manifest(self, work_directory: Any) -> list[dict[str, str]]:
         if not work_directory:

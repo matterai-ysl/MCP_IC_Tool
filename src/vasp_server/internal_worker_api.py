@@ -146,6 +146,9 @@ def build_internal_worker_router(task_manager) -> APIRouter:
                 artifact_manifest=request.artifact_manifest,
             )
         except ValueError as exc:
+            snapshot = load_task_snapshot(task_id)
+            if snapshot["status"] == "completed":
+                return WorkerTaskStatusResponse(task_id=task_id, status=TaskStatus.completed)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return WorkerTaskStatusResponse(task_id=task_id, status=TaskStatus.completed)
