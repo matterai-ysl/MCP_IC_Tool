@@ -486,7 +486,7 @@ class AgentAnalyzeRequest(StrictRequestModel):
     user_id: str = Field(..., description="用户ID")
     task_id: str = Field(..., description="已完成的任务ID")
     question: str = Field(..., description="分析问题，例如：'带隙是多少？绘制能量收敛曲线。'")
-    model: str = Field("claude-haiku-4-5-20251001", description="内层分析 Agent 使用的模型")
+    model: str = Field("qwen3.5-plus", description="内层分析 Agent 使用的模型")
 
 
 class AgentAnalyzeResponse(BaseModel):

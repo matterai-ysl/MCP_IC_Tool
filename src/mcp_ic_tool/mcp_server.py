@@ -808,8 +808,8 @@ async def analyze_vasp_output(
                   "Plot the energy and force convergence curves."
                   "Compare initial vs final volume. What changed?"
                   "Extract all ionic step energies and fit a convergence rate."
-        model: Inner agent model (default: claude-haiku-4-5-20251001).
-               Use claude-sonnet-4-6 for complex multi-step analysis.
+        model: Inner agent model (default: qwen3.5-plus).
+               Claude models still work when ANTHROPIC_API_KEY is configured.
 
     Returns answer (with JSON summary), step count, and plot URLs.
     """
