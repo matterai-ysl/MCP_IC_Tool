@@ -2,8 +2,10 @@
 VASP 数据分析 Agent
 基于 LangGraph create_react_agent + 持久化 Python REPL + skills 库
 """
+import importlib
 import io
 import logging
+import os
 import signal
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -13,10 +15,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
-from langchain_anthropic import ChatAnthropic
-from langchain_core.tools import tool as lc_tool
-from langgraph.prebuilt import create_react_agent
 
 from .analysis_skills import (
     extract_final_energy, extract_energy_per_atom, get_ionic_steps_energy,
@@ -29,6 +27,8 @@ from .analysis_skills import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MODEL_NAME = "qwen3.5-plus"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  System prompt
@@ -127,6 +127,7 @@ class _SafeREPL:
 #  Tool factory
 # ──────────────────────────────────────────────────────────────────────────────
 def _make_tools(work_dir: str) -> list:
+    lc_tool = importlib.import_module("langchain_core.tools").tool
     repl = _SafeREPL(
         initial_globals={
             "work_dir": work_dir,
@@ -177,13 +178,47 @@ def _make_tools(work_dir: str) -> list:
     return [execute_python, list_files]
 
 
+def _create_chat_model(model_name: str):
+    normalized = model_name.strip()
+    lowered = normalized.lower()
+
+    if lowered.startswith("qwen"):
+        api_key = os.environ.get("QWEN_API_KEY")
+        base_url = os.environ.get("QWEN_BASE_URL")
+        if not api_key:
+            raise ValueError("QWEN_API_KEY 未设置，无法使用 Qwen 分析模型")
+        if not base_url:
+            raise ValueError("QWEN_BASE_URL 未设置，无法使用 Qwen 分析模型")
+
+        chat_openai = importlib.import_module("langchain_openai").ChatOpenAI
+        return chat_openai(
+            model=normalized,
+            temperature=0,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=4096,
+        )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY 未设置，无法使用 Claude 分析模型")
+
+    chat_anthropic = importlib.import_module("langchain_anthropic").ChatAnthropic
+    return chat_anthropic(
+        model=normalized,
+        temperature=0,
+        api_key=api_key,
+        max_tokens=4096,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Public API
 # ──────────────────────────────────────────────────────────────────────────────
 async def run_analysis(
     work_dir: str,
     question: str,
-    model_name: str = "claude-haiku-4-5-20251001",
+    model_name: str = _DEFAULT_MODEL_NAME,
 ) -> Dict[str, Any]:
     """
     在 work_dir 上运行 VASP 分析 Agent，返回分析结果。
@@ -195,15 +230,9 @@ async def run_analysis(
             "generated_plots": list,   # 生成的 PNG 文件名列表
         }
     """
-    import os
-
     tools = _make_tools(work_dir)
-    model = ChatAnthropic(
-        model=model_name,
-        temperature=0,
-        api_key=os.environ.get("ANTHROPIC_API_KEY"),
-        max_tokens=4096,
-    )
+    model = _create_chat_model(model_name)
+    create_react_agent = importlib.import_module("langgraph.prebuilt").create_react_agent
     agent = create_react_agent(model, tools, prompt=_SYSTEM_PROMPT)
 
     # Collect PNG files before the run to detect newly generated ones

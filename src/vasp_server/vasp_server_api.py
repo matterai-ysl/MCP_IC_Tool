@@ -1,14 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from typing import List
+from typing import Any, Dict, List
 import os
 import uvicorn
 import logging
 import sys
 from pathlib import Path
 # Config import moved to __main__ block
+from .internal_worker_api import build_internal_worker_router
 from .schemas import (
     StructOptRequest, StructOptResponse, TaskStatusResponse,
     TaskStatus, AnalysisStatus, ArtifactInfo,
@@ -22,6 +21,7 @@ from .schemas import (
     CustomCalcRequest, CustomCalcResponse,
     AgentAnalyzeRequest, AgentAnalyzeResponse,
 )
+from .settings import settings
 from .task_manager.manager import TaskManager
 from .task_manager.database import check_and_init_db, engine
 
@@ -85,16 +85,9 @@ async def _startup_init():
     logger.info("🔧 检查并初始化数据库...")
     check_and_init_db()
 
-    from .Config import DOWNLOAD_URL
-    static_root = Path(DOWNLOAD_URL)
-    if static_root.exists():
-        app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
-        logger.info(f"📁 Static files mounted: {static_root}")
-    else:
-        logger.warning(f"⚠️  Static root does not exist, skip mount: {static_root}")
-
 # 创建全局任务管理器实例
 task_manager = TaskManager()
+app.include_router(build_internal_worker_router(task_manager))
 
 @app.get("/")
 async def root():
@@ -153,46 +146,57 @@ def _record_task_submitted(task_type: str):
         vasp_tasks_queued.inc()
 
 
+def _require_completed_upstream_task(task_id: str, user_id: str, task_label: str):
+    task = task_manager.get_task(task_id, user_id)
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{task_label} {task_id} 未找到或无权限访问",
+        )
+    if str(task.status) != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_label} {task_id} 尚未完成",
+        )
+    return task
+
+
+def _resolve_queue_name(requested_queue_name: str | None, upstream_tasks: List[Any] | None = None) -> str:
+    requested = str(requested_queue_name).strip() if requested_queue_name else None
+    upstream_queue_names = {
+        str(getattr(task, "queue_name", "default") or "default")
+        for task in (upstream_tasks or [])
+        if task is not None
+    }
+    if not upstream_queue_names:
+        return requested or "default"
+
+    if len(upstream_queue_names) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="上游任务位于不同 queue_name，无法在不同超算之间直接续算",
+        )
+
+    upstream_queue_name = next(iter(upstream_queue_names))
+    if requested and requested != upstream_queue_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"queue_name 必须与上游任务一致: {upstream_queue_name}",
+        )
+    return upstream_queue_name
+
+
 @app.post("/vasp/structure-optimization", response_model=StructOptResponse)
 async def submit_structure_optimization(request: StructOptRequest):
-    """
-    提交结构优化任务
-    
-    支持两种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    
-    Returns:
-        StructOptResponse: 包含任务ID和状态的响应
-    """
+    """提交结构优化任务。"""
     try:
-        # 准备任务参数 (input validation is handled by StructOptRequest's model_post_init)
         task_params = {
-            "formula": request.formula,
-            "cif_url": str(request.cif_url) if request.cif_url else None,
-
+            "cif_url": str(request.cif_url),
+            "queue_name": _resolve_queue_name(request.queue_name),
             "kpoint_density": request.kpoint_density,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
         if request.user_id is None:
             request.user_id = os.getenv("DEFAULT_USER_ID", "123")
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="structure_optimization",
@@ -214,72 +218,32 @@ async def submit_structure_optimization(request: StructOptRequest):
 
 @app.post("/vasp/scf-calculation", response_model=SCFResponse)
 async def submit_scf_calculation(request: SCFRequest):
-    """
-    提交自洽场计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    3. 优化任务ID：基于已完成的结构优化任务的CONTCAR文件
-    
-    Returns:
-        SCFResponse: 包含任务ID和状态的响应
-    """
+    """提交自洽场计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.optimized_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.optimized_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 optimized_task_id 中的一个"
+                detail="必须提供 cif_url 或 optimized_task_id 中的一个"
             )
         
         # 如果基于优化任务，验证任务存在性
+        upstream_task = None
         if request.optimized_task_id:
-            opt_task = task_manager.get_task(request.optimized_task_id, request.user_id)
-            if not opt_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"结构优化任务 {request.optimized_task_id} 未找到或无权限访问"
-                )
-            if str(opt_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"结构优化任务 {request.optimized_task_id} 尚未完成"
-                )
+            upstream_task = _require_completed_upstream_task(
+                request.optimized_task_id,
+                request.user_id,
+                "结构优化任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
-        # 准备任务参数
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "optimized_task_id": request.optimized_task_id,
-
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="scf_calculation",
@@ -287,7 +251,7 @@ async def submit_scf_calculation(request: SCFRequest):
         )
         _record_task_submitted("scf_calculation")
 
-        input_source = "化学式" if request.formula else "CIF URL" if request.cif_url else "结构优化任务"
+        input_source = "结构 URL" if request.cif_url else "结构优化任务"
         
         return SCFResponse(
             task_id=task_id,
@@ -303,73 +267,33 @@ async def submit_scf_calculation(request: SCFRequest):
 
 @app.post("/vasp/dos-calculation", response_model=DOSResponse)
 async def submit_dos_calculation(request: DOSRequest):
-    """
-    提交态密度计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件（需要先完成自洽场计算）
-    2. CIF URL：直接从指定URL下载CIF文件（需要先完成自洽场计算）
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果
-    
-    Returns:
-        DOSResponse: 包含任务ID和状态的响应
-    """
+    """提交态密度计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
         
         # 如果基于自洽场任务，验证任务存在性
+        upstream_task = None
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            upstream_task = _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
-        # 准备任务参数
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
-
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "kpoint_multiplier": request.kpoint_multiplier,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="dos_calculation",
@@ -380,11 +304,8 @@ async def submit_dos_calculation(request: DOSRequest):
         if request.scf_task_id:
             input_source = "自洽场计算任务"
             calc_mode = "态密度计算"
-        elif request.formula:
-            input_source = "化学式"
-            calc_mode = "单点自洽+DOS计算"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
             calc_mode = "单点自洽+DOS计算"
         
         return DOSResponse(
@@ -401,65 +322,32 @@ async def submit_dos_calculation(request: DOSRequest):
 
 @app.post("/vasp/band-structure", response_model=BandStructureResponse)
 async def submit_band_structure_calculation(request: BandStructureRequest):
-    """
-    提交能带结构计算任务
-
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件
-    2. CIF URL：直接从指定URL下载CIF文件
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果（推荐）
-
-    Returns:
-        BandStructureResponse: 包含任务ID和状态的响应
-    """
+    """提交能带结构计算任务。"""
     try:
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url),
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400,
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
 
+        upstream_task = None
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            upstream_task = _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
 
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "line_density": request.line_density,
             "precision": request.precision,
         }
-
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -470,10 +358,8 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
 
         if request.scf_task_id:
             input_source = "自洽场计算任务"
-        elif request.formula:
-            input_source = "化学式"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
 
         return BandStructureResponse(
             task_id=task_id,
@@ -489,75 +375,35 @@ async def submit_band_structure_calculation(request: BandStructureRequest):
 
 @app.post("/vasp/md-calculation", response_model=MDResponse)
 async def submit_md_calculation(request: MDRequest):
-    """
-    提交分子动力学计算任务
-    
-    支持三种输入方式：
-    1. 化学式：从Materials Project数据库搜索和下载CIF文件（纯MD计算）
-    2. CIF URL：直接从指定URL下载CIF文件（纯MD计算）
-    3. 自洽场任务ID：基于已完成的自洽场计算任务结果
-    
-    Returns:
-        MDResponse: 包含任务ID和状态的响应
-    """
+    """提交分子动力学计算任务。"""
     try:
-        # 验证输入参数
-        input_count = sum([
-            bool(request.formula),
-            bool(request.cif_url), 
-            bool(request.scf_task_id)
-        ])
+        input_count = sum([bool(request.cif_url), bool(request.scf_task_id)])
         if input_count != 1:
             raise HTTPException(
                 status_code=400, 
-                detail="必须提供 formula、cif_url 或 scf_task_id 中的一个"
+                detail="必须提供 cif_url 或 scf_task_id 中的一个"
             )
         
         # 如果基于自洽场任务，验证任务存在性
+        upstream_task = None
         if request.scf_task_id:
-            scf_task = task_manager.get_task(request.scf_task_id, request.user_id)
-            if not scf_task:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 未找到或无权限访问"
-                )
-            if str(scf_task.status) != "completed":  # type: ignore
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"自洽场计算任务 {request.scf_task_id} 尚未完成"
-                )
+            upstream_task = _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "自洽场计算任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         
-        # 准备任务参数（temperature 始终为单个 float）
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
-
+            "queue_name": queue_name,
             "md_steps": request.md_steps,
             "temperature": float(request.temperature),
             "time_step": request.time_step,
             "ensemble": request.ensemble,
             "precision": request.precision,
         }
-        
-        # 添加材料搜索参数（仅当使用formula时）
-        if request.formula:
-            search_params = {
-                "spacegroup": request.spacegroup,
-                "max_energy_above_hull": request.max_energy_above_hull,
-                "min_band_gap": request.min_band_gap,
-                "max_band_gap": request.max_band_gap,
-                "max_nsites": request.max_nsites,
-                "min_nsites": request.min_nsites,
-                "stable_only": request.stable_only,
-                "selection_mode": request.selection_mode.value,
-            }
-            # 只添加非None的参数
-            for key, value in search_params.items():
-                if value is not None:
-                    task_params[key] = value
-        
-        # 提交任务
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="md_calculation",
@@ -568,11 +414,8 @@ async def submit_md_calculation(request: MDRequest):
         if request.scf_task_id:
             input_source = "自洽场计算任务"
             calc_mode = "分子动力学计算"
-        elif request.formula:
-            input_source = "化学式"
-            calc_mode = "纯MD计算"
         else:
-            input_source = "CIF URL"
+            input_source = "结构 URL"
             calc_mode = "纯MD计算"
         
         return MDResponse(
@@ -590,19 +433,29 @@ async def submit_md_calculation(request: MDRequest):
 async def submit_neb_calculation(request: NEBRequest):
     """提交 NEB（过渡态）计算任务"""
     try:
+        upstream_tasks = []
+        if request.initial_task_id:
+            upstream_tasks.append(_require_completed_upstream_task(
+                request.initial_task_id,
+                request.user_id,
+                "初始态任务",
+            ))
+        if request.final_task_id:
+            upstream_tasks.append(_require_completed_upstream_task(
+                request.final_task_id,
+                request.user_id,
+                "终态任务",
+            ))
+        queue_name = _resolve_queue_name(request.queue_name, upstream_tasks)
+
         task_params = {
-            "initial_formula": request.initial_formula,
             "initial_cif_url": str(request.initial_cif_url) if request.initial_cif_url else None,
             "initial_task_id": request.initial_task_id,
-            "final_formula": request.final_formula,
             "final_cif_url": str(request.final_cif_url) if request.final_cif_url else None,
             "final_task_id": request.final_task_id,
+            "queue_name": queue_name,
             "n_images": request.n_images,
             "kpoint_density": request.kpoint_density,
-            "spacegroup": request.spacegroup,
-            "max_energy_above_hull": request.max_energy_above_hull,
-            "stable_only": request.stable_only,
-            "selection_mode": request.selection_mode.value,
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
@@ -628,19 +481,21 @@ async def submit_neb_calculation(request: NEBRequest):
 async def submit_phonon_calculation(request: PhononRequest):
     """提交声子计算任务（IBRION=6，Gamma 点有限位移法）"""
     try:
+        upstream_task = None
+        if request.scf_task_id:
+            upstream_task = _require_completed_upstream_task(
+                request.scf_task_id,
+                request.user_id,
+                "上游任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         task_params = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "scf_task_id": request.scf_task_id,
+            "queue_name": queue_name,
             "kpoint_density": request.kpoint_density,
             "displacement": request.displacement,
         }
-        if request.formula:
-            for k in ("spacegroup", "max_energy_above_hull", "min_band_gap", "max_band_gap",
-                      "max_nsites", "min_nsites", "stable_only", "selection_mode"):
-                v = getattr(request, k)
-                if v is not None:
-                    task_params[k] = v.value if hasattr(v, 'value') else v
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
 
@@ -665,20 +520,22 @@ async def submit_phonon_calculation(request: PhononRequest):
 async def submit_custom_calculation(request: CustomCalcRequest):
     """提交通用自定义计算任务 — 用户完全控制INCAR，适合HSE06、DFPT介电、ELF、Wannier等长尾需求"""
     try:
+        upstream_task = None
+        if request.from_task_id:
+            upstream_task = _require_completed_upstream_task(
+                request.from_task_id,
+                request.user_id,
+                "上游任务",
+            )
+        queue_name = _resolve_queue_name(request.queue_name, [upstream_task] if upstream_task else [])
         task_params: Dict[str, Any] = {
-            "formula": request.formula,
             "cif_url": str(request.cif_url) if request.cif_url else None,
             "from_task_id": request.from_task_id,
+            "queue_name": queue_name,
             "incar": request.incar,
             "kpoint_density": request.kpoint_density,
             "kpoint_mode": request.kpoint_mode,
         }
-        if request.formula:
-            for k in ("spacegroup", "max_energy_above_hull", "min_band_gap", "max_band_gap",
-                      "max_nsites", "min_nsites", "stable_only", "selection_mode"):
-                v = getattr(request, k)
-                if v is not None:
-                    task_params[k] = v.value if hasattr(v, "value") else v
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -730,6 +587,51 @@ def _safe_analysis_status(status_val) -> AnalysisStatus | None:
         return None
 
 
+def _is_public_url(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.startswith(("https://", "http://")):
+        return True
+    if settings.legacy_local_artifact_urls_enabled and value.startswith(("/static/", "/download/file/")):
+        return True
+    return False
+
+
+def _sanitize_public_value(value):
+    if isinstance(value, dict):
+        return {key: _sanitize_public_value(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_public_value(item) for item in value]
+    if isinstance(value, str) and value.startswith("/"):
+        return None
+    return value
+
+
+def _sanitize_report_urls(result_summary, result_data, html_report_url):
+    sanitized_summary = _sanitize_public_value(result_summary)
+    sanitized_data = _sanitize_public_value(result_data)
+
+    if isinstance(sanitized_summary, dict) and "html_report_url" in sanitized_summary:
+        sanitized_summary["html_report_url"] = html_report_url if _is_public_url(html_report_url) else None
+
+    report_keys = [
+        "analysis_report_html_path",
+        "html_analysis_report",
+        "md_analysis_report_html_path",
+        "dos_analysis_report_html_path",
+        "scf_analysis_report_html_path",
+        "band_structure_report_html_path",
+        "neb_report_html_path",
+        "phonon_report_html_path",
+    ]
+    if isinstance(sanitized_data, dict):
+        for key in report_keys:
+            if key in sanitized_data:
+                sanitized_data[key] = html_report_url if _is_public_url(html_report_url) else None
+
+    return sanitized_summary, sanitized_data
+
+
 def _build_task_response(task, task_id: str) -> TaskStatusResponse:
     """从 Task ORM 构建统一的 TaskStatusResponse"""
     # 从 result_summary 提取 html_report_url
@@ -755,17 +657,33 @@ def _build_task_response(task, task_id: str) -> TaskStatusResponse:
     try:
         raw_artifacts = task_manager.get_task_artifacts(task_id)
         if raw_artifacts:
-            artifacts_list = [
-                ArtifactInfo(
-                    id=str(a.id),
-                    artifact_type=str(a.artifact_type),
-                    mime_type=getattr(a, 'mime_type', None),
-                    size_bytes=getattr(a, 'size_bytes', None),
+            artifacts_list = []
+            for a in raw_artifacts:
+                download_url = task_manager.get_artifact_download_url(a)
+                content_type = getattr(a, 'content_type', None) or getattr(a, 'mime_type', None)
+                artifacts_list.append(
+                    ArtifactInfo(
+                        id=str(a.id),
+                        artifact_type=str(a.artifact_type),
+                        mime_type=getattr(a, 'mime_type', None),
+                        content_type=content_type,
+                        size_bytes=getattr(a, 'size_bytes', None),
+                        download_url=download_url,
+                    )
                 )
-                for a in raw_artifacts
-            ]
+                if str(getattr(a, 'artifact_type', '')) == "html_report" and download_url:
+                    html_report_url = download_url
     except Exception:
         pass  # artifact 查询失败不影响主响应
+
+    if not _is_public_url(html_report_url):
+        html_report_url = None
+
+    result_data = getattr(task, 'result_data', None)
+    result_summary, result_data = _sanitize_report_urls(result_summary, result_data, html_report_url)
+    result_path = getattr(task, 'result_path', None)
+    if not _is_public_url(result_path):
+        result_path = None
 
     response_data = {
         "task_id": getattr(task, 'id', None),
@@ -779,11 +697,11 @@ def _build_task_response(task, task_id: str) -> TaskStatusResponse:
         "artifacts": artifacts_list,
         "progress_message": getattr(task, 'progress_message', None),
         "params": getattr(task, 'params', None),
-        "result_path": getattr(task, 'result_path', None),
+        "result_path": result_path,
         "external_job_id": getattr(task, 'external_job_id', None),
         "process_id": getattr(task, 'process_id', None),
         "error_message": getattr(task, 'error_message', None),
-        "result_data": getattr(task, 'result_data', None),
+        "result_data": result_data,
         "created_at": getattr(task, 'created_at', None),
         "updated_at": getattr(task, 'updated_at', None),
     }
@@ -834,47 +752,10 @@ async def list_user_tasks(user_id: str = Query(..., description="用户ID")):
 
 @app.get("/download/file/{file_path:path}")
 async def download_file(file_path: str):
-    """
-    提供文件下载服务
-
-    Args:
-        file_path: 相对于工作目录的文件路径
-
-    Returns:
-        FileResponse: 文件下载响应
-    """
-    try:
-        from .Config import DOWNLOAD_URL
-
-        root = Path(DOWNLOAD_URL).resolve()
-        full_path = (root / file_path).resolve()
-
-        # Prevent path traversal: resolved path must stay under root.
-        try:
-            full_path.relative_to(root)
-        except ValueError:
-            raise HTTPException(status_code=403, detail="非法文件路径")
-
-        # 安全检查：确保文件路径在允许的范围内
-        if not full_path.exists():
-            raise HTTPException(status_code=404, detail=f"文件不存在: {full_path}")
-
-        if not full_path.is_file():
-            raise HTTPException(status_code=404, detail="路径不是文件")
-
-        # 获取文件名用于下载
-        filename = full_path.name
-
-        return FileResponse(
-            full_path,
-            filename=filename,
-            media_type='application/octet-stream'
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"下载文件失败: {str(e)}")
+    raise HTTPException(
+        status_code=410,
+        detail="本地文件下载已下线，请使用任务状态中的对象存储签名 URL",
+    )
 
 
 # ====================================================================== #

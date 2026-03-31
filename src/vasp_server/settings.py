@@ -34,10 +34,31 @@ class VaspServerSettings(BaseSettings):
     vasp_remote_run_port: int = 8140
     vasp_public_base_url: str = "https://api.matterai.tech"
     mcp_port: int = 8130
+    internal_worker_token: str = "worker-token"
+
+    # ---- Object storage ----
+    artifact_storage_backend: str = "oss"
+    oss_endpoint: str = "https://oss-cn-hangzhou.aliyuncs.com"
+    s3_endpoint: Optional[str] = None
+    oss_bucket: str = "vasp-artifacts"
+    oss_region: str = "cn-hangzhou"
+    oss_access_key_id: str = "test-access-key"
+    oss_access_key_secret: str = "test-secret"
+    artifact_url_expire_seconds: int = 3600
+    legacy_local_artifact_urls_enabled: bool = False
 
     # ---- Task management ----
     max_concurrent_tasks: int = 4
     default_user_id: str = "123"
+    task_lease_seconds: int = 300
+    worker_poll_interval_seconds: int = 10
+    worker_heartbeat_timeout_seconds: int = 120
+
+    # ---- Notification service ----
+    notification_service_base_url: Optional[str] = None
+    notification_service_api_key: Optional[str] = None
+    notification_timeout_seconds: float = 5.0
+    notification_language: str = "zh"
 
     # ---- Quota ----
     max_user_concurrent_tasks: int = 3  # 单用户最大并发任务数

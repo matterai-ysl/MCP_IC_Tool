@@ -1,11 +1,11 @@
 import hashlib
 import json
+import mimetypes
 import os
 import threading
 import uuid
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +16,12 @@ from sqlalchemy import func as sa_func
 
 from .database import SessionLocal
 from .models import Task, ExecutionAttempt, AnalysisRun, Artifact
+from ..notification_client import (
+    TASK_TYPE_TO_DISPLAY_NAME,
+    build_task_notification_payload,
+    send_notification_async,
+)
+from ..storage import ObjectStorageService
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +75,41 @@ TASK_TYPE_TO_METHOD = {
     "custom_calculation": "run_custom_calculation",
 }
 
+TASK_TYPE_TO_NOTIFICATION_METRICS = {
+    "structure_optimization": (
+        ("final_energy", "最终能量"),
+        ("final_max_force", "最终最大受力"),
+    ),
+    "scf_calculation": (
+        ("total_energy", "总能量"),
+        ("band_gap", "带隙"),
+    ),
+    "dos_calculation": (
+        ("band_gap", "带隙"),
+        ("total_energy", "总能量"),
+    ),
+    "band_structure": (
+        ("band_gap", "带隙"),
+        ("total_energy", "总能量"),
+    ),
+    "md_calculation": (
+        ("final_energy", "最终能量"),
+        ("average_temperature", "平均温度"),
+    ),
+    "neb_calculation": (
+        ("forward_barrier_eV", "正向势垒"),
+        ("reaction_energy_eV", "反应能"),
+    ),
+    "phonon_calculation": (
+        ("n_imaginary", "虚频数量"),
+        ("max_real_freq_cm1", "最大实频"),
+    ),
+    "custom_calculation": (
+        ("total_energy", "总能量"),
+        ("band_gap", "带隙"),
+    ),
+}
+
 
 def _is_retryable_error(error_msg: str) -> bool:
     """判断错误是否为可重试的基础设施故障"""
@@ -81,7 +122,7 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
     # 只取影响计算结果的关键参数，忽略 user_id 等
     key_fields = {
         "task_type": task_type,
-        "formula": params.get("formula"),
+        "queue_name": params.get("queue_name"),
         "cif_url": params.get("cif_url"),
         "optimized_task_id": params.get("optimized_task_id"),
         "scf_task_id": params.get("scf_task_id"),
@@ -96,10 +137,8 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
         # NEB
         "initial_task_id": params.get("initial_task_id"),
         "initial_cif_url": params.get("initial_cif_url"),
-        "initial_formula": params.get("initial_formula"),
         "final_task_id": params.get("final_task_id"),
         "final_cif_url": params.get("final_cif_url"),
-        "final_formula": params.get("final_formula"),
         "n_images": params.get("n_images"),
         # Phonon
         "displacement": params.get("displacement"),
@@ -114,13 +153,101 @@ def _compute_input_hash(task_type: str, params: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _format_notification_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
 class TaskManager:
     def __init__(self, max_workers: int = MAX_CONCURRENT_TASKS) -> None:
+        self._max_workers = max_workers
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="vasp-worker"
+        self.storage_service = ObjectStorageService.from_settings()
+
+    @staticmethod
+    def _notification_language(task: Task) -> str:
+        params = task.params or {}
+        language = str(params.get("notification_language") or params.get("language") or "zh")
+        return language if language in {"zh", "en"} else "zh"
+
+    @staticmethod
+    def _notification_email(task: Task) -> Optional[str]:
+        params = task.params or {}
+        email = params.get("to_email") or params.get("notification_email")
+        return str(email).strip() if email else None
+
+    @staticmethod
+    def _notification_execution_time(*sources: Optional[Dict[str, Any]]) -> Optional[float]:
+        for source in sources:
+            if not source:
+                continue
+            value = source.get("computation_time")
+            if value is None:
+                value = source.get("execution_time_seconds")
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _notification_result_summary(task_type: str, result: Optional[Dict[str, Any]]) -> str:
+        display_name = TASK_TYPE_TO_DISPLAY_NAME.get(task_type, task_type)
+        data = result or {}
+        for key, label in TASK_TYPE_TO_NOTIFICATION_METRICS.get(task_type, ()):
+            value = data.get(key)
+            if value is not None:
+                return f"{display_name}完成，{label} = {_format_notification_value(value)}"
+        return f"{display_name}完成"
+
+    @staticmethod
+    def _notification_error_message(error_message: str) -> str:
+        return " ".join(str(error_message).strip().splitlines())[:300]
+
+    def _notify_task_success(
+        self,
+        task: Task,
+        result_data: Optional[Dict[str, Any]] = None,
+        result_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = build_task_notification_payload(
+            user_id=str(task.user_id),
+            task_id=str(task.id),
+            task_type=str(task.task_type),
+            notification_type="tool_complete",
+            status="success",
+            language=self._notification_language(task),
+            execution_time_seconds=self._notification_execution_time(result_summary, result_data),
+            result_summary=self._notification_result_summary(
+                str(task.task_type),
+                result_summary or result_data,
+            ),
+            to_email=self._notification_email(task),
         )
+        send_notification_async(payload)
+
+    def _notify_task_error(
+        self,
+        task: Task,
+        error_message: str,
+        result_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = build_task_notification_payload(
+            user_id=str(task.user_id),
+            task_id=str(task.id),
+            task_type=str(task.task_type),
+            notification_type="tool_error",
+            status="error",
+            language=self._notification_language(task),
+            execution_time_seconds=self._notification_execution_time(result_data),
+            error_message=self._notification_error_message(error_message),
+            to_email=self._notification_email(task),
+        )
+        send_notification_async(payload)
 
     # ------------------------------------------------------------------ #
     #  提交任务
@@ -157,7 +284,14 @@ class TaskManager:
                 db.query(sa_func.count(Task.id))
                 .filter(
                     Task.user_id == user_id,
-                    Task.status.in_(["queued", "running", "analyzing"]),
+                    Task.status.in_([
+                        "queued",
+                        "leased",
+                        "running",
+                        "uploading",
+                        "analyzing",
+                        "cancel_requested",
+                    ]),
                 )
                 .scalar()
             ) or 0
@@ -186,29 +320,393 @@ class TaskManager:
                 )
 
             task_id = uuid.uuid4().hex
-            cancel_event = threading.Event()
-            with self._lock:
-                self._cancel_flags[task_id] = cancel_event
 
             task = Task(
                 id=task_id,
                 user_id=user_id,
                 task_type=task_type,
+                tenant_id=str(params.get("tenant_id", "default")),
+                queue_name=str(params.get("queue_name", "default")),
+                priority=int(params.get("priority", 0)),
                 status="queued",
                 analysis_status="pending",
                 progress=0,
                 params=params,
                 input_snapshot=params,
                 input_hash=input_hash,
+                retry_count=0,
+                max_retries=int(params.get("max_retries", MAX_TASK_RETRIES)),
             )
             db.add(task)
             db.commit()
         finally:
             db.close()
 
-        self._executor.submit(self._run_task_worker, task_id, cancel_event)
-
         return task_id
+
+    def _lease_expiration(self, now: datetime) -> datetime:
+        from ..settings import settings as _settings
+
+        return now + timedelta(seconds=_settings.task_lease_seconds)
+
+    def register_artifact(
+        self,
+        task_id: str,
+        artifact_type: str,
+        owner_type: str,
+        owner_id: Optional[str],
+        filename: str,
+        content_type: Optional[str] = None,
+        size_bytes: Optional[float] = None,
+        etag: Optional[str] = None,
+        sha256: Optional[str] = None,
+        attempt_no: int = 1,
+    ) -> SimpleNamespace:
+        db: Session = SessionLocal()
+        try:
+            task: Optional[Task] = db.get(Task, task_id)
+            if task is None:
+                raise ValueError(f"任务不存在: {task_id}")
+
+            location = self.storage_service.build_location(
+                tenant_id=str(task.tenant_id),
+                task_id=task_id,
+                attempt_no=attempt_no,
+                filename=filename,
+            )
+            artifact = Artifact(
+                id=uuid.uuid4().hex,
+                task_id=task_id,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                artifact_type=artifact_type,
+                storage_backend=location.storage_backend,
+                storage_key=location.object_key,
+                bucket=location.bucket,
+                object_key=location.object_key,
+                mime_type=content_type,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                checksum=sha256,
+                etag=etag,
+                sha256=sha256,
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+            return _orm_to_ns(artifact)
+        finally:
+            db.close()
+
+    def get_artifact_download_url(self, artifact: SimpleNamespace) -> Optional[str]:
+        object_key = getattr(artifact, "object_key", None) or getattr(artifact, "storage_key", None)
+        storage_backend = getattr(artifact, "storage_backend", None)
+        if storage_backend in {"oss", "s3"} and object_key:
+            return self.storage_service.create_download_url(str(object_key))
+        return None
+
+    @staticmethod
+    def _infer_artifact_type(filename: str) -> str:
+        lower = filename.lower()
+        mapping = {
+            "outcar": "outcar",
+            "contcar": "contcar",
+            "poscar": "poscar",
+            "potcar": "potcar",
+            "doscar": "doscar",
+            "chgcar": "chgcar",
+            "chg": "chg",
+            "wavecar": "wavecar",
+            "kpoints": "kpoints",
+            "incar": "incar",
+            "result.log": "result_log",
+            "report.html": "html_report",
+            "index.html": "html_report",
+        }
+        return mapping.get(lower, mapping.get(os.path.basename(lower), "file"))
+
+    def _persist_artifact_manifest(
+        self,
+        db: Session,
+        task: Task,
+        artifact_manifest: List[Dict[str, Any]] | None,
+    ) -> None:
+        if not artifact_manifest:
+            return
+
+        existing_filenames = {
+            str(a.storage_key)
+            for a in db.query(Artifact).filter(Artifact.task_id == task.id).all()
+        }
+
+        for item in artifact_manifest:
+            filename = str(item.get("filename") or os.path.basename(str(item.get("local_path") or "")) or "artifact.bin")
+            if not filename:
+                continue
+            if any(existing.endswith(f"/{filename}") or existing == filename for existing in existing_filenames):
+                continue
+
+            content_type = item.get("content_type")
+            if content_type is None:
+                content_type = mimetypes.guess_type(filename)[0]
+
+            location = self.storage_service.build_location(
+                tenant_id=str(task.tenant_id),
+                task_id=str(task.id),
+                attempt_no=int(item.get("attempt_no", 1)),
+                filename=filename,
+            )
+            artifact = Artifact(
+                id=uuid.uuid4().hex,
+                task_id=task.id,
+                owner_type=str(item.get("owner_type", "execution")),
+                owner_id=item.get("owner_id"),
+                artifact_type=str(item.get("artifact_type") or self._infer_artifact_type(filename)),
+                storage_backend=location.storage_backend,
+                storage_key=location.object_key,
+                bucket=location.bucket,
+                object_key=location.object_key,
+                mime_type=content_type,
+                content_type=content_type,
+                size_bytes=item.get("size_bytes"),
+                checksum=item.get("sha256"),
+                etag=item.get("etag"),
+                sha256=item.get("sha256"),
+            )
+            db.add(artifact)
+            existing_filenames.add(location.object_key)
+
+    def _validate_lease(
+        self,
+        db: Session,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+    ) -> Task:
+        task: Optional[Task] = db.get(Task, task_id)
+        if task is None:
+            raise ValueError(f"任务不存在: {task_id}")
+        if str(task.worker_id) != worker_id or str(task.lease_token) != lease_token:
+            raise ValueError("lease token 或 worker_id 无效")
+        return task
+
+    def claim_next_task(self, worker_id: str, queue_name: str) -> Optional[SimpleNamespace]:
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            query = (
+                db.query(Task)
+                .filter(
+                    Task.status == "queued",
+                    Task.queue_name == queue_name,
+                )
+                .order_by(Task.priority.desc(), Task.created_at.asc())
+            )
+            if db.bind is not None and db.bind.dialect.name == "postgresql":
+                query = query.with_for_update(skip_locked=True)
+
+            task = query.first()
+            if task is None:
+                return None
+
+            task.status = "leased"  # type: ignore
+            task.worker_id = worker_id  # type: ignore
+            task.lease_token = uuid.uuid4().hex  # type: ignore
+            task.lease_expires_at = self._lease_expiration(now)  # type: ignore
+            task.heartbeat_at = now  # type: ignore
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            return _orm_to_ns(task)
+        finally:
+            db.close()
+
+    def heartbeat_task(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            if str(task.status) not in {"leased", "running", "uploading", "analyzing"}:
+                raise ValueError(f"任务状态不允许续租: {task.status}")
+
+            now = datetime.now(timezone.utc)
+            task.heartbeat_at = now  # type: ignore
+            task.lease_expires_at = self._lease_expiration(now)  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def mark_task_running(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            task.status = "running"  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def request_cancel(self, task_id: str, user_id: str) -> bool:
+        db: Session = SessionLocal()
+        try:
+            task: Optional[Task] = db.get(Task, task_id)
+            if task is None or str(task.user_id) != user_id:
+                return False
+            if str(task.status) in {"completed", "failed", "canceled"}:
+                return True
+
+            task.status = "cancel_requested"  # type: ignore
+            task.cancel_requested_at = datetime.now(timezone.utc)  # type: ignore
+            db.add(task)
+            db.commit()
+            return True
+        finally:
+            db.close()
+
+    def ack_cancel(self, task_id: str, lease_token: str, worker_id: str) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            task.status = "canceled"  # type: ignore
+            task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+            task.worker_id = None  # type: ignore
+            task.lease_token = None  # type: ignore
+            task.lease_expires_at = None  # type: ignore
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+    def complete_execution(
+        self,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+        result_data: Optional[Dict[str, Any]] = None,
+        artifact_manifest: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            self._persist_artifact_manifest(db, task, artifact_manifest)
+            task.status = "completed"  # type: ignore
+            task.result_data = result_data  # type: ignore
+            task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+            task.worker_id = None  # type: ignore
+            task.lease_token = None  # type: ignore
+            task.lease_expires_at = None  # type: ignore
+            db.add(task)
+            db.commit()
+            self._notify_task_success(task, result_data=result_data)
+        finally:
+            db.close()
+
+    def fail_execution(
+        self,
+        task_id: str,
+        lease_token: str,
+        worker_id: str,
+        error_message: str,
+        artifact_manifest: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        db: Session = SessionLocal()
+        try:
+            task = self._validate_lease(db, task_id, lease_token, worker_id)
+            self._persist_artifact_manifest(db, task, artifact_manifest)
+            if str(task.status) == "cancel_requested":
+                task.status = "canceled"  # type: ignore
+                task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                db.add(task)
+                db.commit()
+                return
+
+            should_requeue = _is_retryable_error(error_message) and task.retry_count < task.max_retries
+            task.error_message = error_message  # type: ignore
+
+            if should_requeue:
+                task.retry_count = (task.retry_count or 0) + 1  # type: ignore
+                task.status = "queued"  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                task.heartbeat_at = None  # type: ignore
+            else:
+                task.status = "failed"  # type: ignore
+                task.finalized_at = datetime.now(timezone.utc)  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+
+            db.add(task)
+            db.commit()
+            if not should_requeue and str(task.status) == "failed":
+                self._notify_task_error(task, error_message)
+        finally:
+            db.close()
+
+    def requeue_expired_leases(self) -> int:
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            expired_tasks = list(
+                db.query(Task)
+                .filter(
+                    Task.status == "leased",
+                    Task.lease_expires_at.is_not(None),
+                    Task.lease_expires_at <= now,
+                )
+                .all()
+            )
+
+            for task in expired_tasks:
+                task.status = "queued"  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                task.heartbeat_at = None  # type: ignore
+                db.add(task)
+
+            db.commit()
+            return len(expired_tasks)
+        finally:
+            db.close()
+
+    def mark_orphaned_running_tasks(self) -> int:
+        from ..settings import settings as _settings
+
+        db: Session = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            heartbeat_deadline = now - timedelta(seconds=_settings.worker_heartbeat_timeout_seconds)
+            orphaned_tasks = list(
+                db.query(Task)
+                .filter(
+                    Task.status.in_(["running", "uploading", "analyzing"]),
+                    Task.heartbeat_at.is_not(None),
+                    Task.heartbeat_at <= heartbeat_deadline,
+                )
+                .all()
+            )
+
+            for task in orphaned_tasks:
+                if task.retry_count < task.max_retries:
+                    task.retry_count = (task.retry_count or 0) + 1  # type: ignore
+                    task.status = "queued"  # type: ignore
+                else:
+                    task.status = "failed"  # type: ignore
+                    task.finalized_at = now  # type: ignore
+                task.worker_id = None  # type: ignore
+                task.lease_token = None  # type: ignore
+                task.lease_expires_at = None  # type: ignore
+                db.add(task)
+
+            db.commit()
+            return len(orphaned_tasks)
+        finally:
+            db.close()
 
     # ------------------------------------------------------------------ #
     #  任务执行主循环 (daemon thread)
@@ -362,6 +860,7 @@ class TaskManager:
                 db.commit()
                 logger.info(f"任务 {task_id[:8]}... 最终失败 (尝试 {attempt_no} 次)")
                 self._emit_completion_metrics(task_type, "failed")
+                self._notify_task_error(task, last_error, result_data=result)
 
         except Exception as exc:
             logger.error(f"任务 {task_id[:8]}... 异常: {exc}", exc_info=True)
@@ -371,6 +870,7 @@ class TaskManager:
                 task.error_message = str(exc)  # type: ignore
                 db.add(task)
                 db.commit()
+                self._notify_task_error(task, str(exc))
         finally:
             db.close()
             with self._lock:
@@ -430,6 +930,7 @@ class TaskManager:
 
         logger.info(f"任务 {task_id[:8]}... 开始分析 (run={run_id[:8]})")
 
+        summary: Optional[Dict[str, Any]] = None
         try:
             # 分析逻辑：从 exec_result 中提取摘要
             summary = self._extract_analysis_summary(task_type, exec_result)
@@ -466,6 +967,7 @@ class TaskManager:
             db.commit()
 
             logger.info(f"任务 {task_id[:8]}... 分析完成")
+            self._notify_task_success(task, result_data=exec_result, result_summary=summary)
 
         except Exception as exc:
             logger.error(f"任务 {task_id[:8]}... 分析失败: {exc}", exc_info=True)
@@ -483,6 +985,7 @@ class TaskManager:
             # 保留 result_data (原始执行结果)
             db.add(task)
             db.commit()
+            self._notify_task_success(task, result_data=exec_result, result_summary=summary)
 
     # ------------------------------------------------------------------ #
     #  提取分析摘要
@@ -641,6 +1144,7 @@ class TaskManager:
                     artifact_type=artifact_type,
                     storage_backend="local",
                     storage_key=filepath,
+                    object_key=None,
                     size_bytes=size,
                 )
                 db.add(artifact)
@@ -657,6 +1161,7 @@ class TaskManager:
                 storage_backend="local",
                 storage_key=html_url,
                 mime_type="text/html",
+                content_type="text/html",
             )
             db.add(artifact)
 
@@ -666,25 +1171,7 @@ class TaskManager:
     #  取消任务
     # ------------------------------------------------------------------ #
     def cancel_task(self, task_id: str, user_id: str) -> bool:
-        db: Session = SessionLocal()
-        try:
-            task: Optional[Task] = db.get(Task, task_id)
-            if task is None or str(task.user_id) != user_id:
-                return False
-            if str(task.status) in {"completed", "failed", "canceled"}:
-                return True
-
-            with self._lock:
-                cancel_event = self._cancel_flags.get(task_id)
-                if cancel_event:
-                    cancel_event.set()
-
-            task.status = "cancel_requested"  # type: ignore
-            db.add(task)
-            db.commit()
-            return True
-        finally:
-            db.close()
+        return self.request_cancel(task_id, user_id)
 
     # ------------------------------------------------------------------ #
     #  查询
@@ -725,6 +1212,39 @@ class TaskManager:
             return [_orm_to_ns(a) for a in rows]
         finally:
             db.close()
+
+    def get_task_artifact_manifest(self, task_id: str) -> List[Dict[str, Any]]:
+        """构造可供下游任务复用的产物清单。"""
+        manifest: List[Dict[str, Any]] = []
+        for artifact in self.get_task_artifacts(task_id):
+            storage_key = getattr(artifact, "storage_key", None)
+            object_key = getattr(artifact, "object_key", None)
+            filename = os.path.basename(str(object_key or storage_key or getattr(artifact, "artifact_type", "artifact")))
+            content_type = getattr(artifact, "content_type", None) or getattr(artifact, "mime_type", None)
+            item: Dict[str, Any] = {
+                "id": str(getattr(artifact, "id")),
+                "artifact_type": str(getattr(artifact, "artifact_type")),
+                "filename": filename,
+                "storage_backend": getattr(artifact, "storage_backend", None),
+                "storage_key": storage_key,
+                "bucket": getattr(artifact, "bucket", None),
+                "object_key": object_key,
+                "content_type": content_type,
+                "size_bytes": getattr(artifact, "size_bytes", None),
+                "etag": getattr(artifact, "etag", None),
+                "sha256": getattr(artifact, "sha256", None),
+            }
+
+            if getattr(artifact, "storage_backend", None) == "local" and storage_key:
+                item["local_path"] = str(storage_key)
+
+            download_url = self.get_artifact_download_url(artifact)
+            if download_url:
+                item["download_url"] = download_url
+
+            manifest.append({key: value for key, value in item.items() if value is not None})
+
+        return manifest
 
     def get_analysis_run(self, task_id: str) -> Optional[SimpleNamespace]:
         """获取任务最新的分析记录"""

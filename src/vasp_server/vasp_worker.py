@@ -9,9 +9,9 @@ from pathlib import Path
 import subprocess
 import time
 
-from .mp import download_with_criteria
 from .base import cif_to_poscar
 from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
+from .input_resolver import UpstreamInputResolver
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class VaspWorker:
         base = base_work_dir or DOWNLOAD_URL
         self.base_work_dir = Path(base) / user_id  # 为每个用户创建独立目录
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
+        self.input_resolver = UpstreamInputResolver()
     
     async def run_structure_optimization(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
@@ -322,35 +323,14 @@ class VaspWorker:
 
     async def _get_cif_file(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """获取CIF文件"""
-        if params.get('formula'):
-            # 从Materials Project下载
-            formula = params['formula']
-            if progress_callback:
-                await progress_callback(10, f"从Materials Project下载 {formula}...")
-            
-            # 构建搜索条件
-            search_kwargs = {}
-            for key in ['spacegroup', 'max_energy_above_hull', 'min_band_gap', 
-                       'max_band_gap', 'max_nsites', 'min_nsites', 'stable_only', 'selection_mode']:
-                if key in params and params[key] is not None:
-                    search_kwargs[key] = params[key]
-            
-            cif_path = await download_with_criteria(
-                formula=formula,
-                save_path=str(work_dir),
-                task_id=params.get('task_id', 'unknown'),
-                **search_kwargs
-            )
-            return str(cif_path) if cif_path else None
-            
-        elif params.get('cif_url'):
+        if params.get('cif_url'):
             # 从URL下载
             cif_url = params['cif_url']
             if progress_callback:
-                await progress_callback(15, f"从URL下载CIF: {cif_url}")
+                await progress_callback(15, f"从URL下载结构文件: {cif_url}")
             
             cif_path = work_dir / "structure.cif"
-            response = requests.get(str(cif_url))
+            response = requests.get(str(cif_url), timeout=60)
             response.raise_for_status()
             
             with open(cif_path, 'wb') as f:
@@ -362,7 +342,15 @@ class VaspWorker:
     
     async def _get_structure_for_scf(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """为自洽场计算获取结构文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
         
+        if params.get('optimized_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取优化后结构...")
+
+            resolved = self.input_resolver.resolve_for_scf(upstream_artifacts, work_dir)
+            return resolved["POSCAR"]
+
         if params.get('optimized_task_id'):
             # 从已完成的结构优化任务获取CONTCAR
             if progress_callback:
@@ -382,17 +370,6 @@ class VaspWorker:
             
             return str(poscar_path)
             
-        elif params.get('formula'):
-            # 从化学式下载CIF然后转换
-            if progress_callback:
-                await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
-            
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            
-            return await self._convert_cif_to_poscar(cif_path, work_dir, params)
-            
         elif params.get('cif_url'):
             # 从CIF URL下载
             if progress_callback:
@@ -405,11 +382,18 @@ class VaspWorker:
             return await self._convert_cif_to_poscar(cif_path, work_dir, params)
         
         else:
-            raise Exception("必须提供 formula、cif_url 或 optimized_task_id 中的一个")
+            raise Exception("必须提供 cif_url 或 optimized_task_id 中的一个")
     
     async def _prepare_dos_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为态密度计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
         
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_dos(upstream_artifacts, work_dir)
+
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
             if progress_callback:
@@ -438,24 +422,6 @@ class VaspWorker:
             
             return copied_files
             
-        elif params.get('formula'):
-            # 从化学式进行单点自洽+DOS计算（一步完成）
-            if progress_callback:
-                await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
-            
-            # 获取CIF并转换为POSCAR
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-            
-            # 生成单点自洽+DOS的输入文件
-            if progress_callback:
-                await progress_callback(20, "准备单点自洽+DOS计算文件...")
-            await self._prepare_single_point_dos_files(work_dir, params)
-            
-            return {"POSCAR": str(poscar_path)}
-            
         elif params.get('cif_url'):
             # 从CIF URL进行单点自洽+DOS计算（一步完成）
             if progress_callback:
@@ -475,10 +441,17 @@ class VaspWorker:
             return {"POSCAR": str(poscar_path)}
         
         else:
-            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
     
     async def _prepare_band_structure_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为能带结构计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_band_structure(upstream_artifacts, work_dir)
 
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
@@ -506,22 +479,6 @@ class VaspWorker:
 
             return copied_files
 
-        elif params.get('formula'):
-            # 从化学式开始，先做SCF再做band structure
-            if progress_callback:
-                await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
-
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-
-            if progress_callback:
-                await progress_callback(20, "准备SCF+能带结构计算文件...")
-            await self._prepare_scf_then_band_structure_files(work_dir, params)
-
-            return {"POSCAR": str(poscar_path)}
-
         elif params.get('cif_url'):
             if progress_callback:
                 await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
@@ -538,10 +495,17 @@ class VaspWorker:
             return {"POSCAR": str(poscar_path)}
 
         else:
-            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
 
     async def _prepare_md_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为分子动力学计算准备文件"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取自洽场结果文件...")
+
+            return self.input_resolver.resolve_for_md(upstream_artifacts, work_dir)
         
         if params.get('scf_task_id'):
             # 从已完成的自洽场计算任务获取文件
@@ -569,24 +533,6 @@ class VaspWorker:
             
             return copied_files
             
-        elif params.get('formula'):
-            # 从化学式进行纯MD计算（一步完成）
-            if progress_callback:
-                await progress_callback(10, f"从Materials Project下载 {params['formula']}...")
-            
-            # 获取CIF并转换为POSCAR
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-            
-            # 生成纯MD的输入文件
-            if progress_callback:
-                await progress_callback(20, "准备纯MD计算文件...")
-            await self._prepare_single_point_md_files(work_dir, params)
-            
-            return {"POSCAR": str(poscar_path)}
-            
         elif params.get('cif_url'):
             # 从CIF URL进行纯MD计算（一步完成）
             if progress_callback:
@@ -606,7 +552,7 @@ class VaspWorker:
             return {"POSCAR": str(poscar_path)}
         
         else:
-            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
     
     async def _prepare_single_point_md_files(self, work_dir: Path, params: Dict[str, Any]):
         """准备纯MD计算的输入文件"""
@@ -2309,14 +2255,23 @@ echo "VASP计算完成"
         """获取 NEB 初始结构和终态结构，返回 (initial_poscar_path, final_poscar_path)。"""
         from .base import generate_potcar
 
-        async def _get_poscar(task_id_key: str, formula_key: str, cif_url_key: str, dest_name: str) -> str:
-            """从 task_id / formula / cif_url 中获取 POSCAR，保存为 dest_name。"""
+        async def _get_poscar(task_id_key: str, cif_url_key: str, manifest_key: str, dest_name: str) -> str:
+            """从 task_id / cif_url 中获取 POSCAR，保存为 dest_name。"""
             task_id_val = params.get(task_id_key)
-            formula_val = params.get(formula_key)
             cif_url_val = params.get(cif_url_key)
             dest = work_dir / dest_name
 
             if task_id_val:
+                upstream_artifacts = params.get(manifest_key) or []
+                if upstream_artifacts:
+                    resolved = self.input_resolver.resolve_single_structure(
+                        upstream_artifacts,
+                        work_dir,
+                        dest_name=dest_name,
+                    )
+                    logger.info("NEB 端点结构来自上游产物清单: %s", task_id_val)
+                    return resolved[dest_name]
+
                 src_dir = self.base_work_dir / task_id_val
                 # 优先使用 CONTCAR（优化后结构），回退 POSCAR
                 for fname in ("CONTCAR", "POSCAR"):
@@ -2330,14 +2285,10 @@ echo "VASP计算完成"
             tmp_dir = work_dir / f"_tmp_{dest_name}"
             tmp_dir.mkdir(exist_ok=True)
             tmp_params = dict(params)
-            if formula_val:
-                tmp_params['formula'] = formula_val
-                tmp_params.pop('cif_url', None)
-            elif cif_url_val:
+            if cif_url_val:
                 tmp_params['cif_url'] = cif_url_val
-                tmp_params.pop('formula', None)
             else:
-                raise Exception(f"必须提供 {task_id_key}、{formula_key} 或 {cif_url_key}")
+                raise Exception(f"必须提供 {task_id_key} 或 {cif_url_key}")
 
             cif_path = await self._get_cif_file(tmp_dir, tmp_params, None)
             if not cif_path:
@@ -2347,8 +2298,18 @@ echo "VASP计算完成"
             shutil.rmtree(str(tmp_dir), ignore_errors=True)
             return str(dest)
 
-        initial_poscar = await _get_poscar("initial_task_id", "initial_formula", "initial_cif_url", "POSCAR_initial")
-        final_poscar = await _get_poscar("final_task_id", "final_formula", "final_cif_url", "POSCAR_final")
+        initial_poscar = await _get_poscar(
+            "initial_task_id",
+            "initial_cif_url",
+            "initial_upstream_artifact_manifest",
+            "POSCAR_initial",
+        )
+        final_poscar = await _get_poscar(
+            "final_task_id",
+            "final_cif_url",
+            "final_upstream_artifact_manifest",
+            "POSCAR_final",
+        )
         return initial_poscar, final_poscar
 
     async def _generate_neb_images(self, work_dir: Path, initial_poscar: str, final_poscar: str, params: Dict[str, Any]):
@@ -2502,6 +2463,15 @@ LREAL = Auto
     async def _prepare_phonon_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None):
         """为声子计算准备 POSCAR 和 POTCAR。"""
         from .base import generate_potcar
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('scf_task_id') and upstream_artifacts:
+            if progress_callback:
+                await progress_callback(15, "从上游产物清单获取声子输入文件...")
+            self.input_resolver.resolve_for_phonon(upstream_artifacts, work_dir)
+            if not (work_dir / "POTCAR").exists():
+                generate_potcar(str(work_dir))
+            return
 
         if params.get('scf_task_id'):
             if progress_callback:
@@ -2522,7 +2492,7 @@ LREAL = Auto
             if not (work_dir / "POTCAR").exists():
                 generate_potcar(str(work_dir))
 
-        elif params.get('formula') or params.get('cif_url'):
+        elif params.get('cif_url'):
             if progress_callback:
                 await progress_callback(10, "获取 CIF 结构文件...")
             cif_path = await self._get_cif_file(work_dir, params, progress_callback)
@@ -2531,7 +2501,7 @@ LREAL = Auto
             await self._convert_cif_to_poscar(cif_path, work_dir, params)
             generate_potcar(str(work_dir))
         else:
-            raise Exception("必须提供 formula、cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
 
     async def _generate_phonon_inputs(self, work_dir: Path, params: Dict[str, Any]):
         """生成声子计算 INCAR 和 KPOINTS。"""
@@ -2650,6 +2620,16 @@ GGA = PE
 
     async def _prepare_custom_structure(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> None:
         """为自定义计算准备 POSCAR（优先 CONTCAR）"""
+        upstream_artifacts = params.get("upstream_artifact_manifest") or []
+
+        if params.get('from_task_id') and upstream_artifacts:
+            resolved = self.input_resolver.resolve_for_custom(upstream_artifacts, work_dir)
+            logger.info("从上游产物清单复制 POSCAR（来自任务 %s）", params['from_task_id'])
+            if progress_callback:
+                await progress_callback(10, "从上游产物清单获取结构文件...")
+            if resolved.get("POSCAR"):
+                return
+
         if params.get('from_task_id'):
             src_dir = self.base_work_dir / params['from_task_id']
             for fname in ("CONTCAR", "POSCAR"):

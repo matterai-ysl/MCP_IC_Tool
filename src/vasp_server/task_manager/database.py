@@ -28,6 +28,10 @@ SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bi
 Base = declarative_base()
 
 
+def database_dialect_name() -> str:
+    return engine.dialect.name
+
+
 def init_db() -> None:
     """初始化数据库表"""
     # 延迟导入以避免循环依赖
