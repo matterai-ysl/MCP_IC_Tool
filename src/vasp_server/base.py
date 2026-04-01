@@ -53,22 +53,18 @@ def cif_to_poscar(cif_path, work_dir='./'):
         sys.exit("错误：未找到文件 {}".format(cif_path))
 
     poscar_path = os.path.join(work_dir, "POSCAR")
+    try:
+        from pymatgen.io.cif import CifParser
+        from pymatgen.io.vasp import Poscar
+    except ImportError as exc:
+        raise RuntimeError("需要安装 pymatgen 以将 CIF 转换为 POSCAR") from exc
 
-    command = [
-        "cif2cell",
-        "-f", cif_path,
-        "-p", "vasp",
-        "-o", poscar_path,
-        "--no-reduce",
-        "--vasp-format=5",
-        "--vasp-cartesian-lattice-vectors"
-    ]
-    subprocess.run(
-        command,
-        cwd=work_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    parser = CifParser(cif_path)
+    structures = parser.parse_structures(primitive=False)
+    if not structures:
+        raise RuntimeError(f"无法从 CIF 解析结构: {cif_path}")
+
+    Poscar(structures[0]).write_file(poscar_path)
     logger.info("POSCAR生成成功")
     return poscar_path
 
