@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 
 class StrictInputModel(BaseModel):
@@ -10,7 +10,7 @@ class StructOptInput(StrictInputModel):
     user_id: Optional[str] = Field(default=None)
     cif_url: HttpUrl
     queue_name: Optional[str] = None
-    kpoint_density: float = 30.0
+    kpoint_density: float = 15.0
     custom_incar: Optional[Dict[str, Any]] = Field(default=None, description="自定义INCAR参数字典")
 
 
@@ -26,29 +26,29 @@ class SCFInput(StrictInputModel):
 
 class DOSInput(StrictInputModel):
     user_id: str
-    cif_url: Optional[HttpUrl] = None
+    input_url: Optional[Union[HttpUrl, List[HttpUrl]]] = None
     scf_task_id: Optional[str] = None
     queue_name: Optional[str] = None
-    kpoint_density: float = 30.0
-    kpoint_multiplier: float = 2.0
-    precision: str = "Accurate"
+    kpoint_density: float = 20.0
+    kpoint_multiplier: float = 1.5
+    precision: str = "High"
     custom_incar: Optional[Dict[str, Any]] = Field(default=None, description="自定义INCAR参数字典")
 
 
 class BandStructureInput(StrictInputModel):
     user_id: str
-    cif_url: Optional[HttpUrl] = None
+    input_url: Optional[Union[HttpUrl, List[HttpUrl]]] = None
     scf_task_id: Optional[str] = None
     queue_name: Optional[str] = None
-    kpoint_density: float = 30.0
+    kpoint_density: float = 20.0
     line_density: int = 20
-    precision: str = "Accurate"
+    precision: str = "High"
     custom_incar: Optional[Dict[str, Any]] = Field(default=None, description="自定义INCAR参数字典")
 
 
 class MDInput(StrictInputModel):
     user_id: str
-    cif_url: Optional[HttpUrl] = None
+    input_url: Optional[HttpUrl] = None
     scf_task_id: Optional[str] = None
     queue_name: Optional[str] = None
     md_steps: int = 1000
@@ -70,7 +70,7 @@ class NEBInput(StrictInputModel):
     # NEB 参数
     n_images: int = Field(default=5, description="中间图像数（不含端点），2-20")
     queue_name: Optional[str] = None
-    kpoint_density: float = 30.0
+    kpoint_density: float = 15.0
     custom_incar: Optional[Dict[str, Any]] = Field(default=None, description="自定义INCAR参数字典")
 
 
@@ -79,7 +79,7 @@ class PhononInput(StrictInputModel):
     cif_url: Optional[HttpUrl] = None
     scf_task_id: Optional[str] = None
     queue_name: Optional[str] = None
-    kpoint_density: float = 30.0
+    kpoint_density: float = 15.0
     displacement: float = Field(default=0.015, description="有限位移步长（Å）")
     custom_incar: Optional[Dict[str, Any]] = Field(default=None, description="自定义INCAR参数字典")
 

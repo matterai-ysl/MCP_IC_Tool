@@ -1,20 +1,24 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from pathlib import Path, PurePosixPath
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 
 from .schemas import (
     TaskStatus,
     WorkerClaimRequest,
     WorkerClaimResponse,
+    WorkerArtifactUploadResponse,
     WorkerCompleteRequest,
     WorkerFailRequest,
     WorkerHeartbeatResponse,
     WorkerLeaseRequest,
     WorkerRegisterRequest,
     WorkerRegisterResponse,
+    WorkerResumeRequest,
     WorkerTaskStatusResponse,
 )
 from .settings import settings
 from .task_manager.database import SessionLocal
-from .task_manager.models import Task
+from .task_manager.models import ExecutionAttempt, Task
 
 
 def build_internal_worker_router(task_manager) -> APIRouter:
@@ -48,6 +52,31 @@ def build_internal_worker_router(task_manager) -> APIRouter:
             }
         finally:
             db.close()
+
+    def current_attempt_no(task_id: str) -> tuple[Task, int]:
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            attempt_no = int(getattr(task, "retry_count", 0) or 0) + 1
+            current_attempt_id = getattr(task, "current_execution_attempt_id", None)
+            if current_attempt_id:
+                attempt = db.get(ExecutionAttempt, current_attempt_id)
+                if attempt is not None and getattr(attempt, "attempt_no", None):
+                    attempt_no = int(attempt.attempt_no)
+            return task, attempt_no
+        finally:
+            db.close()
+
+    def sanitize_artifact_path(artifact_path: str) -> str:
+        pure = PurePosixPath(artifact_path)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise HTTPException(status_code=400, detail="invalid artifact path")
+        normalized = pure.as_posix().lstrip("./")
+        if not normalized:
+            raise HTTPException(status_code=400, detail="empty artifact path")
+        return normalized
 
     @router.post(
         "/internal/workers/register",
@@ -87,6 +116,36 @@ def build_internal_worker_router(task_manager) -> APIRouter:
             lease_expires_at=claimed.lease_expires_at,
             task_type=str(claimed.task_type),
             queue_name=str(claimed.queue_name),
+            params=params,
+        )
+
+    @router.post(
+        "/internal/tasks/{task_id}/resume",
+        response_model=WorkerClaimResponse,
+    )
+    def resume_task(
+        task_id: str,
+        request: WorkerResumeRequest,
+        _auth: None = Depends(require_internal_worker_auth),
+    ) -> WorkerClaimResponse:
+        try:
+            resumed = task_manager.resume_task(
+                task_id=task_id,
+                worker_id=request.worker_id,
+                queue_name=request.queue_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        params = getattr(resumed, "params", {}) or {}
+        return WorkerClaimResponse(
+            task_id=str(resumed.id),
+            status=TaskStatus(str(resumed.status)),
+            worker_id=str(resumed.worker_id),
+            lease_token=str(resumed.lease_token),
+            lease_expires_at=resumed.lease_expires_at,
+            task_type=str(resumed.task_type),
+            queue_name=str(resumed.queue_name),
             params=params,
         )
 
@@ -168,6 +227,8 @@ def build_internal_worker_router(task_manager) -> APIRouter:
                 lease_token=request.lease_token,
                 worker_id=request.worker_id,
                 error_message=request.error_message,
+                failure_code=request.failure_code,
+                failure_context=request.failure_context,
                 artifact_manifest=request.artifact_manifest,
             )
         except ValueError as exc:
@@ -194,5 +255,42 @@ def build_internal_worker_router(task_manager) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return WorkerTaskStatusResponse(task_id=task_id, status=TaskStatus.canceled)
+
+    @router.put(
+        "/internal/tasks/{task_id}/artifacts/{artifact_path:path}",
+        response_model=WorkerArtifactUploadResponse,
+    )
+    async def upload_public_artifact(
+        task_id: str,
+        artifact_path: str,
+        request: Request,
+        content_type: str | None = Header(default=None, alias="Content-Type"),
+        _auth: None = Depends(require_internal_worker_auth),
+    ) -> WorkerArtifactUploadResponse:
+        task, attempt_no = current_attempt_no(task_id)
+        artifact_rel_path = sanitize_artifact_path(artifact_path)
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty artifact payload")
+
+        location = task_manager.storage_service.build_public_location(
+            tenant_id=str(task.tenant_id),
+            task_id=str(task.id),
+            attempt_no=attempt_no,
+            filename=artifact_rel_path,
+        )
+        target_path = Path(location.storage_key)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(body)
+
+        download_url = task_manager.storage_service.create_public_download_url(location.object_key)
+        return WorkerArtifactUploadResponse(
+            storage_backend=location.storage_backend,
+            storage_key=location.storage_key,
+            object_key=location.object_key,
+            download_url=download_url,
+            content_type=content_type,
+            size_bytes=float(len(body)),
+        )
 
     return router

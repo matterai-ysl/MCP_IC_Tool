@@ -47,7 +47,7 @@ class StructOptRequest(StrictRequestModel):
     user_id: Optional[str] = Field(None, description="用户ID")
     cif_url: HttpUrl = Field(..., description="结构文件URL")
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
-    kpoint_density: float = Field(30.0, description="K点密度参数")
+    kpoint_density: float = Field(15.0, description="K点密度参数")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典，用于覆盖默认参数")
     _check_custom_incar = field_validator("custom_incar")(_validate_custom_incar)
 
@@ -76,6 +76,7 @@ class ArtifactInfo(BaseModel):
     """Artifact 摘要 (对外返回)"""
     id: str
     artifact_type: str
+    filename: Optional[str] = None
     mime_type: Optional[str] = None
     content_type: Optional[str] = None
     size_bytes: Optional[float] = None
@@ -100,6 +101,8 @@ class TaskStatusResponse(BaseModel):
     result_summary: Optional[dict] = Field(None, description="结构化结果摘要")
     html_report_url: Optional[str] = Field(None, description="HTML分析报告URL")
     artifacts: Optional[List[ArtifactInfo]] = Field(None, description="产物列表")
+    preview_images: Optional[List[ArtifactInfo]] = Field(None, description="前端可直接预览的关键图片")
+    data_downloads: Optional[List[ArtifactInfo]] = Field(None, description="图表对应的原始数据下载链接")
     progress_message: Optional[str] = Field(None, description="进度消息")
 
     # --- 兼容旧字段 ---
@@ -108,6 +111,8 @@ class TaskStatusResponse(BaseModel):
     external_job_id: Optional[str] = None
     process_id: Optional[int] = Field(None, description="VASP进程ID")
     error_message: Optional[str] = None
+    failure_type: Optional[str] = Field(None, description="失败类型枚举，供前端和智能体做结构化处理")
+    suggested_action: Optional[str] = Field(None, description="当任务失败时，返回给智能体的明确修复建议")
     result_data: Optional[dict] = Field(None, description="详细的计算结果数据")
     created_at: str
     updated_at: str
@@ -125,6 +130,11 @@ class WorkerRegisterResponse(BaseModel):
 
 
 class WorkerClaimRequest(BaseModel):
+    worker_id: str
+    queue_name: str = "default"
+
+
+class WorkerResumeRequest(BaseModel):
     worker_id: str
     queue_name: str = "default"
 
@@ -157,6 +167,15 @@ class WorkerTaskStatusResponse(BaseModel):
     status: TaskStatus
 
 
+class WorkerArtifactUploadResponse(BaseModel):
+    storage_backend: str
+    storage_key: str
+    object_key: str
+    download_url: str
+    content_type: Optional[str] = None
+    size_bytes: Optional[float] = None
+
+
 class WorkerCompleteRequest(WorkerLeaseRequest):
     result_data: Optional[dict] = None
     artifact_manifest: List[dict] = Field(default_factory=list)
@@ -165,6 +184,7 @@ class WorkerCompleteRequest(WorkerLeaseRequest):
 class WorkerFailRequest(WorkerLeaseRequest):
     error_message: str
     failure_code: Optional[str] = None
+    failure_context: Optional[dict] = None
     artifact_manifest: List[dict] = Field(default_factory=list)
 
 class StructOptResult(BaseModel):
@@ -221,23 +241,30 @@ class DOSRequest(StrictRequestModel):
     user_id: str = Field(..., description="用户ID")
     
     # 输入源（二选一）
-    cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
+    input_url: Optional[Union[HttpUrl, List[HttpUrl]]] = Field(
+        None,
+        description=(
+            "DOS 输入URL。可传单个结构文件 URL、zip/tar.gz 输入包，"
+            "也可传多个 URL 的数组（如 POSCAR/POTCAR/CHGCAR/INCAR）。"
+            "若检测到 CHGCAR，将直接复用做 DOS；否则自动执行单点自洽+DOS。"
+        ),
+    )
     scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # VASP计算参数
-    kpoint_density: float = Field(30.0, description="K点密度参数")
-    kpoint_multiplier: float = Field(2.0, description="K点倍增因子 (相对于优化计算)")
-    precision: str = Field("Accurate", description="计算精度 (Normal, High, Accurate)")
+    kpoint_density: float = Field(20.0, description="K点密度参数")
+    kpoint_multiplier: float = Field(1.5, description="K点倍增因子 (相对于优化计算)")
+    precision: str = Field("High", description="计算精度 (Normal, High, Accurate)")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
 
     _check_custom_incar = field_validator("custom_incar")(_validate_custom_incar)
 
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
-        input_count = sum([bool(self.cif_url), bool(self.scf_task_id)])
+        input_count = sum([bool(self.input_url), bool(self.scf_task_id)])
         if input_count != 1:
-            raise ValueError("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise ValueError("必须提供 input_url 或 scf_task_id 中的一个")
 
 class DOSResponse(BaseModel):
     """态密度计算响应模型"""
@@ -263,23 +290,40 @@ class BandStructureRequest(StrictRequestModel):
     user_id: str = Field(..., description="用户ID")
 
     # 输入源（二选一）
-    cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
-    scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
+    input_url: Optional[Union[HttpUrl, List[HttpUrl]]] = Field(
+        None,
+        description=(
+            "能带输入URL。既可传单个 URL，也可传多个 URL 的数组。支持三类输入："
+            "1) 单个结构文件（如 .cif），将自动执行内部 SCF seed 后再做能带；"
+            "2) 多个 URL 共同组成输入（例如 POSCAR/POTCAR/CHGCAR 或 structure.cif+POTCAR）；"
+            "3) zip/tar.gz 输入包。若检测到 CHGCAR，将直接复用做 NSCF 能带，否则自动先做 SCF。"
+        ),
+    )
+    scf_task_id: Optional[str] = Field(
+        None,
+        description="已完成的自洽场计算任务ID。传入后将直接复用上游 CHGCAR 做 NSCF 能带。",
+    )
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # VASP计算参数
-    kpoint_density: float = Field(30.0, description="K点密度参数 (用于SCF步骤)")
-    line_density: int = Field(20, description="能带k路径上每段的k点数")
-    precision: str = Field("Accurate", description="计算精度 (Normal, High, Accurate)")
+    kpoint_density: float = Field(
+        20.0,
+        description="K点密度参数。仅在 input_url 需要内部执行 SCF seed 时使用。",
+    )
+    line_density: int = Field(20, description="能带高对称路径上每一段的k点数。")
+    precision: str = Field(
+        "High",
+        description="计算精度 (Normal, High, Accurate)。若复用已有 CHGCAR，会尽量保留来源中的网格相关设置。",
+    )
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
 
     _check_custom_incar = field_validator("custom_incar")(_validate_custom_incar)
 
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
-        input_count = sum([bool(self.cif_url), bool(self.scf_task_id)])
+        input_count = sum([bool(self.input_url), bool(self.scf_task_id)])
         if input_count != 1:
-            raise ValueError("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise ValueError("必须提供 input_url 或 scf_task_id 中的一个")
 
 
 class BandStructureResponse(BaseModel):
@@ -309,7 +353,10 @@ class MDRequest(StrictRequestModel):
     user_id: str = Field(..., description="用户ID")
     
     # 输入源（二选一）
-    cif_url: Optional[HttpUrl] = Field(None, description="结构文件URL")
+    input_url: Optional[HttpUrl] = Field(
+        None,
+        description="MD 输入URL。支持单个结构文件 URL 或单个结构输入包 URL（zip/tar.gz）。",
+    )
     scf_task_id: Optional[str] = Field(None, description="已完成的自洽场计算任务ID")
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
@@ -325,9 +372,9 @@ class MDRequest(StrictRequestModel):
 
     def model_post_init(self, __context) -> None:
         """验证输入参数"""
-        input_count = sum([bool(self.cif_url), bool(self.scf_task_id)])
+        input_count = sum([bool(self.input_url), bool(self.scf_task_id)])
         if input_count != 1:
-            raise ValueError("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise ValueError("必须提供 input_url 或 scf_task_id 中的一个")
 
 class MDResponse(BaseModel):
     """分子动力学计算响应模型"""
@@ -374,9 +421,14 @@ class AnalyzeResponse(BaseModel):
     """独立分析响应模型"""
     success: bool = Field(..., description="分析是否成功")
     analysis_type: str = Field(..., description="分析类型")
+    analysis_task_id: Optional[str] = Field(None, description="异步分析任务ID")
+    status: Optional[TaskStatus] = Field(None, description="异步分析任务状态")
+    message: Optional[str] = Field(None, description="响应消息")
     summary: Optional[dict] = Field(None, description="结构化分析摘要")
     html_report_url: Optional[str] = Field(None, description="HTML分析报告URL")
     error_message: Optional[str] = Field(None, description="错误信息")
+    failure_type: Optional[str] = Field(None, description="失败类型枚举，供前端和智能体做结构化处理")
+    suggested_action: Optional[str] = Field(None, description="失败时建议智能体执行的下一步")
 
 
 class NEBRequest(StrictRequestModel):
@@ -394,7 +446,7 @@ class NEBRequest(StrictRequestModel):
     # NEB 参数
     n_images: int = Field(5, ge=2, le=20, description="中间图像数（不含端点）")
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
-    kpoint_density: float = Field(30.0, description="K点密度参数")
+    kpoint_density: float = Field(15.0, description="K点密度参数")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
 
     _check_custom_incar = field_validator("custom_incar")(_validate_custom_incar)
@@ -425,7 +477,7 @@ class PhononRequest(StrictRequestModel):
     queue_name: Optional[str] = Field(None, description="目标超算队列/共享存储标识")
 
     # 声子参数
-    kpoint_density: float = Field(30.0, description="K点密度参数")
+    kpoint_density: float = Field(15.0, description="K点密度参数")
     displacement: float = Field(0.015, description="有限位移步长（Å），影响精度")
     custom_incar: Optional[Dict[str, Any]] = Field(None, description="自定义INCAR参数字典")
 
@@ -492,7 +544,13 @@ class AgentAnalyzeRequest(StrictRequestModel):
 class AgentAnalyzeResponse(BaseModel):
     """AI Agent 分析响应"""
     success: bool
+    analysis_task_id: Optional[str] = Field(None, description="异步分析任务ID")
+    status: Optional[TaskStatus] = Field(None, description="异步分析任务状态")
+    message: Optional[str] = Field(None, description="响应消息")
     answer: str = Field("", description="Agent 的完整分析回答（含 JSON 摘要）")
     steps: int = Field(0, description="Agent 执行代码的次数")
     generated_plots: List[str] = Field(default_factory=list, description="生成图表的访问URL列表")
+    html_report_url: Optional[str] = Field(None, description="HTML分析报告URL")
     error_message: Optional[str] = None
+    failure_type: Optional[str] = Field(None, description="失败类型枚举，供前端和智能体做结构化处理")
+    suggested_action: Optional[str] = Field(None, description="失败时建议智能体执行的下一步")

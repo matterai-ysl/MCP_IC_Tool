@@ -4,8 +4,8 @@ from pathlib import Path
 BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8130")
 DOWNLOAD_URL = os.getenv("VASP_WORK_ROOT", "/data/home/ysl9527/vasp_calculations")
 MCP_PORT = int(os.getenv("MCP_PORT", "8130"))
-VASP_SERVER_BASE_URL = os.getenv("VASP_SERVER_BASE_URL", "https://api.matterai.tech")
-VASP_SERVER_BASE_File_URL = os.getenv("VASP_PUBLIC_BASE_URL", "https://api.matterai.tech")
+VASP_SERVER_BASE_URL = os.getenv("VASP_SERVER_BASE_URL", "http://127.0.0.1:8140")
+VASP_SERVER_BASE_File_URL = os.getenv("VASP_PUBLIC_BASE_URL", "https://www.matterai.cn")
 
 
 def get_download_url(path: str) -> str:

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from pathlib import Path
 import uuid
 
 import httpx
@@ -180,3 +181,52 @@ def test_complete_endpoint_is_idempotent_for_replayed_success(app, db_session):
     assert first_complete.status_code == 200
     assert replay_complete.status_code == 200
     assert replay_complete.json()["status"] == "completed"
+
+
+def test_worker_resume_endpoint_reassigns_lease_to_current_worker(app, db_session):
+    task_id = _create_task(
+        db_session,
+        status="running",
+        worker_id="hpc-old",
+        lease_token="lease-old",
+        queue_name="default",
+    )
+
+    resume_resp = _request(
+        app,
+        "POST",
+        f"/internal/tasks/{task_id}/resume",
+        json={"worker_id": "hpc-new", "queue_name": "default"},
+        headers=_worker_headers(),
+    )
+
+    assert resume_resp.status_code == 200
+    payload = resume_resp.json()
+    assert payload["task_id"] == task_id
+    assert payload["worker_id"] == "hpc-new"
+    assert payload["lease_token"] != "lease-old"
+    assert payload["status"] == "running"
+
+
+def test_internal_artifact_upload_persists_public_file_under_dft(app, db_session, monkeypatch, tmp_path):
+    from src.vasp_server.settings import settings
+
+    task_id = _create_task(db_session, status="running", tenant_id="tenant-a", retry_count=0)
+    monkeypatch.setattr(settings, "local_public_artifact_root", str(tmp_path))
+    monkeypatch.setattr(settings, "public_artifact_base_url", "https://www.matterai.cn/dft")
+
+    resp = _request(
+        app,
+        "PUT",
+        f"/internal/tasks/{task_id}/artifacts/optimization_analysis_report.html",
+        content=b"<html>ok</html>",
+        headers={**_worker_headers(), "Content-Type": "text/html"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["storage_backend"] == "local_public"
+    assert payload["object_key"] == f"tenant/tenant-a/tasks/{task_id}/attempts/1/optimization_analysis_report.html"
+    assert payload["download_url"] == f"https://www.matterai.cn/dft/tenant/tenant-a/tasks/{task_id}/attempts/1/optimization_analysis_report.html"
+    stored = tmp_path / "tenant" / "tenant-a" / "tasks" / task_id / "attempts" / "1" / "optimization_analysis_report.html"
+    assert stored.read_text(encoding="utf-8") == "<html>ok</html>"

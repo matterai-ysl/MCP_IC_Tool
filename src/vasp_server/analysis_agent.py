@@ -2,11 +2,13 @@
 VASP 数据分析 Agent
 基于 LangGraph create_react_agent + 持久化 Python REPL + skills 库
 """
+import asyncio
 import importlib
 import io
 import logging
 import os
 import signal
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,6 +27,7 @@ from .analysis_skills import (
     get_total_energy_from_vasprun, get_electronic_steps, get_magnetization,
     plot_energy_convergence, plot_dos, plot_band_structure, plot_forces_convergence,
 )
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +102,14 @@ class _SafeREPL:
     def run(self, code: str) -> str:
         out_buf = io.StringIO()
         err_buf = io.StringIO()
+        can_use_signal_timeout = threading.current_thread() is threading.main_thread()
 
         def _alarm(signum, frame):
             raise TimeoutError(f"Code execution timed out ({self.timeout}s)")
 
-        signal.signal(signal.SIGALRM, _alarm)
-        signal.alarm(self.timeout)
+        if can_use_signal_timeout:
+            signal.signal(signal.SIGALRM, _alarm)
+            signal.alarm(self.timeout)
         try:
             with redirect_stdout(out_buf), redirect_stderr(err_buf):
                 exec(compile(code, "<agent>", "exec"), self.globals)  # noqa: S102
@@ -120,7 +125,8 @@ class _SafeREPL:
             tb = traceback.format_exc()
             return f"Error: {type(exc).__name__}: {exc}\n{tb[-600:]}"
         finally:
-            signal.alarm(0)
+            if can_use_signal_timeout:
+                signal.alarm(0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -183,8 +189,8 @@ def _create_chat_model(model_name: str):
     lowered = normalized.lower()
 
     if lowered.startswith("qwen"):
-        api_key = os.environ.get("QWEN_API_KEY")
-        base_url = os.environ.get("QWEN_BASE_URL")
+        api_key = settings.qwen_api_key or os.environ.get("QWEN_API_KEY")
+        base_url = settings.qwen_base_url or os.environ.get("QWEN_BASE_URL")
         if not api_key:
             raise ValueError("QWEN_API_KEY 未设置，无法使用 Qwen 分析模型")
         if not base_url:
@@ -199,7 +205,7 @@ def _create_chat_model(model_name: str):
             max_tokens=4096,
         )
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY 未设置，无法使用 Claude 分析模型")
 
@@ -238,9 +244,24 @@ async def run_analysis(
     # Collect PNG files before the run to detect newly generated ones
     before = {f.name for f in Path(work_dir).glob("*.png")}
 
-    result = await agent.ainvoke({
-        "messages": [{"role": "user", "content": question}]
-    })
+    try:
+        result = await asyncio.wait_for(
+            agent.ainvoke(
+                {"messages": [{"role": "user", "content": question}]},
+                config={"recursion_limit": int(settings.agent_analysis_max_iterations)},
+            ),
+            timeout=float(settings.agent_analysis_timeout_seconds),
+        )
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"Agent 分析超时（>{settings.agent_analysis_timeout_seconds:.0f}s），请缩小问题范围后重试"
+        ) from exc
+    except Exception as exc:
+        if exc.__class__.__name__ == "GraphRecursionError":
+            raise RuntimeError(
+                f"Agent 分析超过最大推理步数（{settings.agent_analysis_max_iterations}），请缩小问题范围后重试"
+            ) from exc
+        raise
 
     final_msg = result["messages"][-1].content
 

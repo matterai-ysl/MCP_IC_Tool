@@ -3,7 +3,7 @@ import uuid
 
 import requests
 
-from src.vasp_server.task_manager.models import Task
+from src.vasp_server.task_manager.models import Artifact, Task
 from tests.conftest import make_mock_worker_result, run_worker_with_mock_result
 
 
@@ -60,6 +60,75 @@ def test_complete_execution_sends_success_notification(task_manager, db_session,
     assert "完成" in payload["context"]["result_summary"]
 
 
+def test_complete_execution_notification_includes_html_report_url(task_manager, db_session, monkeypatch):
+    task_id = _create_task(db_session)
+    sent_payloads = []
+    monkeypatch.setattr(
+        "src.vasp_server.task_manager.manager.send_notification_async",
+        lambda payload: sent_payloads.append(payload),
+    )
+
+    task_manager.complete_execution(
+        task_id=task_id,
+        lease_token="lease-1",
+        worker_id="hpc-a",
+        result_data={
+            "computation_time": 12.5,
+            "final_energy": -10.2,
+            "analysis_report_html_path": "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/1/optimization_analysis_report.html",
+        },
+    )
+
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["context"]["html_report_url"] == (
+        "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/1/optimization_analysis_report.html"
+    )
+    assert "https://www.matterai.cn/dft/" in payload["context"]["result_summary"]
+
+
+def test_complete_execution_notification_prefers_public_artifact_html_report_url(task_manager, db_session, monkeypatch):
+    task_id = _create_task(db_session)
+    artifact = Artifact(
+        id=uuid.uuid4().hex,
+        task_id=task_id,
+        owner_type="analysis",
+        owner_id=uuid.uuid4().hex,
+        artifact_type="html_report",
+        storage_backend="local_public",
+        storage_key="tenant/default/tasks/task-x/attempts/2/agent_analysis/agent_analysis_report.html",
+        object_key="tenant/default/tasks/task-x/attempts/2/agent_analysis/agent_analysis_report.html",
+        mime_type="text/html",
+        content_type="text/html",
+    )
+    db_session.add(artifact)
+    db_session.commit()
+
+    sent_payloads = []
+    monkeypatch.setattr(
+        "src.vasp_server.task_manager.manager.send_notification_async",
+        lambda payload: sent_payloads.append(payload),
+    )
+
+    task_manager.complete_execution(
+        task_id=task_id,
+        lease_token="lease-1",
+        worker_id="hpc-a",
+        result_data={
+            "computation_time": 12.5,
+            "final_energy": -10.2,
+            "analysis_report_html_path": "/data/home/ysl9527/vasp_calculations/hpc-c2ln6/task-x/agent_analysis/agent_analysis_report.html",
+        },
+    )
+
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["context"]["html_report_url"] == (
+        "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/2/agent_analysis/agent_analysis_report.html"
+    )
+    assert "/data/home/ysl9527" not in payload["context"]["result_summary"]
+
+
 def test_fail_execution_requeue_does_not_send_notification(task_manager, db_session, monkeypatch):
     task_id = _create_task(db_session, max_retries=2)
     sent_payloads = []
@@ -106,6 +175,77 @@ def test_fail_execution_terminal_failure_sends_error_notification(task_manager, 
     stored_task = db_session.get(Task, task_id)
     assert stored_task is not None
     assert stored_task.status == "failed"
+
+
+def test_fail_execution_notification_includes_html_report_url_when_available(task_manager, db_session, monkeypatch):
+    task_id = _create_task(
+        db_session,
+        max_retries=1,
+        result_summary={
+            "html_report_url": "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/1/report.html",
+        },
+    )
+    sent_payloads = []
+    monkeypatch.setattr(
+        "src.vasp_server.task_manager.manager.send_notification_async",
+        lambda payload: sent_payloads.append(payload),
+    )
+
+    task_manager.fail_execution(
+        task_id=task_id,
+        lease_token="lease-1",
+        worker_id="hpc-a",
+        error_message="Fatal VASP parsing error",
+    )
+
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["context"]["html_report_url"] == (
+        "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/1/report.html"
+    )
+
+
+def test_fail_execution_notification_prefers_public_artifact_html_report_url(task_manager, db_session, monkeypatch):
+    task_id = _create_task(
+        db_session,
+        max_retries=1,
+        result_summary={
+            "html_report_url": "/data/home/ysl9527/vasp_calculations/hpc-c2ln6/task-x/report.html",
+        },
+    )
+    artifact = Artifact(
+        id=uuid.uuid4().hex,
+        task_id=task_id,
+        owner_type="analysis",
+        owner_id=uuid.uuid4().hex,
+        artifact_type="html_report",
+        storage_backend="local_public",
+        storage_key="tenant/default/tasks/task-x/attempts/3/report.html",
+        object_key="tenant/default/tasks/task-x/attempts/3/report.html",
+        mime_type="text/html",
+        content_type="text/html",
+    )
+    db_session.add(artifact)
+    db_session.commit()
+
+    sent_payloads = []
+    monkeypatch.setattr(
+        "src.vasp_server.task_manager.manager.send_notification_async",
+        lambda payload: sent_payloads.append(payload),
+    )
+
+    task_manager.fail_execution(
+        task_id=task_id,
+        lease_token="lease-1",
+        worker_id="hpc-a",
+        error_message="Fatal VASP parsing error",
+    )
+
+    assert len(sent_payloads) == 1
+    payload = sent_payloads[0]
+    assert payload["context"]["html_report_url"] == (
+        "https://www.matterai.cn/dft/tenant/default/tasks/task-x/attempts/3/report.html"
+    )
 
 
 def test_local_worker_success_sends_notification(task_manager, db_session, monkeypatch):

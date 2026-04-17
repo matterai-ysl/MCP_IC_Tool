@@ -1200,6 +1200,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
     def _generate_body_sections(self) -> str:
         return (
             self._generate_summary()
+            + self._generate_plain_language_interpretation()
             + self._generate_electronic_convergence_section()
             + self._generate_electronic_structure_section()
             + self._generate_forces_stress_section()
@@ -1207,6 +1208,15 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
             + self._generate_bader_section()
             + self._generate_elfcar_section()
             + self._generate_final_results_section()
+        )
+
+    def _chart_guide(self, text: str) -> str:
+        return (
+            '<div style="margin-top: 12px; padding: 12px 14px; '
+            'background: #f7fafc; border-left: 4px solid #4299e1; '
+            'border-radius: 6px; color: #2d3748;">'
+            f'<strong>怎么看这张图：</strong> {text}'
+            '</div>'
         )
 
     # ------------------------------------------------------------------ #
@@ -1254,6 +1264,51 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                         {(final.get('fermi_energy') or 0):.4f} eV
                     </div>
                 </div>
+            </div>
+        </div>
+        """
+
+    def _generate_plain_language_interpretation(self) -> str:
+        """面向非计算用户的 SCF 通俗解读。"""
+        final = self.data.get('final_results', {})
+        electronic = self.data.get('electronic_structure', {})
+        forces_data = self.data.get('forces_and_stress', {})
+
+        converged = bool(final.get('converged', False))
+        gap = electronic.get('band_gap')
+        max_force = forces_data.get('max_force')
+
+        if gap is None:
+            gap_text = "这次结果暂时没有可靠带隙值，所以更适合作为后续分析的中间结果。"
+        elif gap <= 1e-3:
+            gap_text = f"当前带隙接近 0 eV，材料更像金属，电子更容易流动。"
+        elif gap < 2.0:
+            gap_text = f"当前带隙约 {gap:.2f} eV，更像半导体。"
+        else:
+            gap_text = f"当前带隙约 {gap:.2f} eV，更像宽带隙半导体或绝缘体。"
+
+        ready_text = (
+            "电子部分已经收敛，可以作为后续 DOS、能带、Bader、ELF 等分析的起点。"
+            if converged
+            else "电子部分还没有完全收敛，更适合先排查参数或继续自洽，再做后续精细分析。"
+        )
+
+        force_text = (
+            f"当前最大原子受力约 {max_force:.3f} eV/Å。"
+            if isinstance(max_force, (int, float))
+            else "这一步主要关注电子收敛，不一定用于判断结构是否已经优化到位。"
+        )
+
+        return f"""
+        <div class="section">
+            <h2>🧭 通俗解读</h2>
+            <div class="summary-card">
+                <p><strong>这一步主要是在把电子状态算稳。</strong> 它通常不是最终结论，而是后续电子结构分析的基础。</p>
+                <ul>
+                    <li>{ready_text}</li>
+                    <li>{gap_text}</li>
+                    <li>{force_text} 如果你的目标是“结构有没有优化好”，还需要结合几何优化报告来看。</li>
+                </ul>
             </div>
         </div>
         """
@@ -1311,6 +1366,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="electronicStepsChart"></canvas>
                     </div>
+                    {self._chart_guide('看柱子是否在后半段逐渐贴近 0；如果前几步波动较大、后几步明显缩小到小范围，通常说明电子自洽过程正在稳定下来。')}
                     {elec_dl}
                 </div>
 
@@ -1319,6 +1375,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="scfEnergyChart"></canvas>
                     </div>
+                    {self._chart_guide('看曲线后半段是否逐渐变平；如果最后几步几乎重合，通常说明总能量已经比较稳定，可以作为后续 DOS、能带或电荷分析的起点。')}
                     {scf_dl}
                 </div>
             </div>
@@ -1423,6 +1480,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="forcesChart"></canvas>
                     </div>
+                    {self._chart_guide('先看是否有少数原子受力特别大；如果个别原子明显高于其他原子，往往说明这些位置还更“紧张”，后续结构弛豫时它们最值得重点关注。')}
                     {self._csv_download_link(
                         'atomic_forces.csv',
                         ['原子索引', '力大小(eV/Å)', 'Fx(eV/Å)', 'Fy(eV/Å)', 'Fz(eV/Å)'],
@@ -1528,6 +1586,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="magnetizationChart"></canvas>
                     </div>
+                    {self._chart_guide('看磁矩是否主要集中在少数原子上；如果只有特定元素的柱子明显更高，通常说明体系的磁性主要由这些原子贡献。')}
                     {self._csv_download_link(
                         'atom_magnetization.csv',
                         ['原子索引', '磁矩大小(μB)'],
@@ -1612,6 +1671,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="baderChargeChart"></canvas>
                     </div>
+                    {self._chart_guide('看不同原子的 Bader 电荷是否自然分组；同类原子如果差别很大，往往意味着它们处在不同的局域化学环境中。')}
                     {self._csv_download_link(
                         'bader_charges.csv',
                         ['原子索引', '元素', 'Bader电荷(e)', '电荷转移(e)'],
@@ -1640,6 +1700,7 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
                     <div class="chart-container">
                         <canvas id="chargeTransferChart"></canvas>
                     </div>
+                    {self._chart_guide('先分清正负方向代表失去电子还是获得电子；如果同一元素的分布很分散，通常说明它在不同位置的成键环境并不完全一样。')}
                     {self._csv_download_link(
                         'charge_transfer.csv',
                         ['原子索引', '元素', '电荷转移(e)'],
@@ -1859,12 +1920,14 @@ class SCFHTMLGenerator(BaseHTMLGenerator):
             total_slices = slice_info.get('total_slices', 1)
 
             if image_base64:
+                png_dl = self._png_download_link(f'elf_{plane.lower()}_slice.png', image_base64)
                 images_html += f"""
                 <div style="text-align: center; margin-bottom: 20px;">
                     <h4>{title}</h4>
                     <img src="data:image/png;base64,{image_base64}"
                          style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px;"
                          alt="{title}">
+                    {png_dl}
                     <p style="font-size: 0.9em; color: #666; margin-top: 5px;">
                         Slice {slice_index + 1} of {total_slices} | Middle slice of the {plane.upper()} plane
                     </p>

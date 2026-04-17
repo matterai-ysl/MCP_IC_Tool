@@ -6,8 +6,13 @@ All environment variables and defaults are managed here. Other modules
 os.getenv() directly.
 """
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PUBLIC_ARTIFACT_ROOT = PROJECT_ROOT / "public_artifacts"
 
 
 class VaspServerSettings(BaseSettings):
@@ -32,7 +37,11 @@ class VaspServerSettings(BaseSettings):
     vasp_server_base_url: str = "http://localhost:8130"
     vasp_remote_run_url: str = "http://localhost:8140"
     vasp_remote_run_port: int = 8140
-    vasp_public_base_url: str = "https://api.matterai.tech"
+    vasp_public_base_url: str = "https://www.matterai.cn"
+    public_artifact_base_url: str = "https://www.matterai.cn/dft"
+    public_artifact_url_prefix: str = "/dft"
+    local_public_artifact_root: str = str(DEFAULT_PUBLIC_ARTIFACT_ROOT)
+    public_artifact_max_upload_bytes: int = 20 * 1024 * 1024
     mcp_port: int = 8130
     internal_worker_token: str = "worker-token"
 
@@ -53,6 +62,7 @@ class VaspServerSettings(BaseSettings):
     task_lease_seconds: int = 300
     worker_poll_interval_seconds: int = 10
     worker_heartbeat_timeout_seconds: int = 120
+    worker_background_heartbeat_interval_seconds: float = 30.0
     worker_control_plane_retry_attempts: int = 8
     worker_control_plane_final_retry_attempts: int = 20
     worker_control_plane_retry_backoff_seconds: float = 2.0
@@ -64,9 +74,28 @@ class VaspServerSettings(BaseSettings):
     notification_timeout_seconds: float = 5.0
     notification_language: str = "zh"
 
+    # ---- LLM providers ----
+    qwen_api_key: Optional[str] = None
+    qwen_base_url: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    agent_analysis_timeout_seconds: float = 300.0
+    agent_analysis_max_iterations: int = 12
+
     # ---- Quota ----
     max_user_concurrent_tasks: int = 3  # 单用户最大并发任务数
     max_user_total_tasks_per_day: int = 50  # 单用户每日最大任务提交数
+
+    # ---- HPC / SLURM ----
+    slurm_nodes: int = 2
+    slurm_ntasks: int = 80
+    slurm_tasks_per_node: int = 40
+    slurm_partition: str = "p1"
+    slurm_time_limit: str = "24:00:00"
+    slurm_module_load: Optional[str] = None
+    oneapi_env_script: Optional[str] = None
+    i_mpi_pmi_library: Optional[str] = None
+    slurm_srun_mpi: Optional[str] = None
+    vasp_slurm_run_line: Optional[str] = None
 
     model_config = {
         "env_file": ".env",

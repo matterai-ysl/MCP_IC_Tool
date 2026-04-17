@@ -326,6 +326,29 @@ class BaseHTMLGenerator:
             f'</div>'
         )
 
+    def _binary_download_link(
+        self,
+        filename: str,
+        media_type: str,
+        base64_payload: str,
+        label: str,
+    ) -> str:
+        if not base64_payload:
+            return ""
+        return (
+            f'<div class="download-bar">'
+            f'<a href="data:{media_type};base64,{base64_payload}" download="{filename}" class="download-link">{label}</a>'
+            f'</div>'
+        )
+
+    def _png_download_link(
+        self,
+        filename: str,
+        base64_payload: str,
+        label: str = "🖼️ 下载图片 (PNG)",
+    ) -> str:
+        return self._binary_download_link(filename, "image/png", base64_payload, label)
+
     # ------------------------------------------------------------------ #
     #  子类必须覆写
     # ------------------------------------------------------------------ #

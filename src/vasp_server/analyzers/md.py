@@ -140,6 +140,19 @@ ANG3_TO_M3 = 1e-30
 PS_TO_S = 1e-12
 
 
+def _integrate_trapezoid(y: np.ndarray, x: np.ndarray) -> float:
+    """兼容 NumPy 1.x/2.x 的梯形积分接口。"""
+    trapezoid = getattr(np, 'trapezoid', None)
+    if callable(trapezoid):
+        return float(trapezoid(y, x=x))
+
+    trapz = getattr(np, 'trapz', None)
+    if callable(trapz):
+        return float(trapz(y, x=x))
+
+    raise AttributeError('numpy has neither trapezoid nor trapz')
+
+
 class VASP_MDAnalyzer:
     """VASP 分子动力学智能分析器
 
@@ -196,6 +209,15 @@ class VASP_MDAnalyzer:
         self.lattice_series: Dict[str, List[float]] = {'a': [], 'b': [], 'c': [], 'vol': []}
 
         self.analysis_data: Dict[str, Any] = {}
+        self.analysis_data.setdefault(
+            'task_info',
+            {
+                'task_id': self.task_id,
+                'input_path': str(self.input_path),
+                'output_dir': str(self.output_dir),
+                'analysis_type': 'VASP_MD_Analysis',
+            },
+        )
 
     # =============================
     # 主入口
@@ -1127,8 +1149,10 @@ class VASP_MDAnalyzer:
                 rho_b = len(structure) / V
 
             mask = r_centers <= r_min
-            dr = np.gradient(r_centers)
-            cn = float(np.trapz(4.0 * math.pi * rho_b * g[mask] * (r_centers[mask] ** 2), x=r_centers[mask]))
+            cn = _integrate_trapezoid(
+                4.0 * math.pi * rho_b * g[mask] * (r_centers[mask] ** 2),
+                x=r_centers[mask],
+            )
 
         return peaks[:5], mins[:5], float(cn)
 
@@ -1502,8 +1526,14 @@ class VASP_MDAnalyzer:
 
     def _generate_html_report(self) -> str:
         logger.info('🌐 生成 HTML 报告…')
-        generator = MDHTMLReportGenerator(self.analysis_data)
         html_path = str(self.output_dir / 'md_analysis_report.html')
+        task_info = self.analysis_data.setdefault('task_info', {})
+        task_info.setdefault('task_id', self.task_id)
+        task_info['input_path'] = str(self.input_path)
+        task_info['output_dir'] = str(self.output_dir)
+        task_info.setdefault('analysis_type', 'VASP_MD_Analysis')
+        self.analysis_data['report_html'] = html_path
+        generator = MDHTMLReportGenerator(self.analysis_data)
         generator.generate_html_report(html_path)
         logger.info(f'HTML 报告: {html_path}')
         return html_path
@@ -1547,6 +1577,7 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
   <div class="container">
     {self._header_md()}
     {self._summary(charts)}
+    {self._section_plain_language()}
     {self._section_diffusion(charts)}
     {self._section_rdf(charts)}
     {self._section_stability(charts)}
@@ -1566,6 +1597,7 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
         charts = self._collect_charts()
         return (
             self._summary(charts)
+            + self._section_plain_language()
             + self._section_diffusion(charts)
             + self._section_rdf(charts)
             + self._section_stability(charts)
@@ -1810,6 +1842,60 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
   </div>
         """
 
+    def _section_plain_language(self) -> str:
+        diff = self.data.get('diffusion', {}) or {}
+        rdf = self.data.get('rdf', {}) or {}
+        stab = self.data.get('stability', {}) or {}
+
+        diffusion_by_element = diff.get('diffusion_by_element', {}) or {}
+        conductivity = diff.get('ionic_conductivity_S_per_m', {}) or {}
+        temperatures = stab.get('temperature_K', []) or diff.get('arrhenius_single', {}).get('T_list_K', []) or []
+
+        fastest = None
+        if diffusion_by_element:
+            fastest = max(diffusion_by_element.items(), key=lambda item: item[1].get('D_m2_per_s', 0.0))
+
+        conductivity_text = "这次没有得到可靠的离子电导率结果。"
+        if conductivity:
+            top_elem, top_sigma = max(conductivity.items(), key=lambda item: item[1])
+            conductivity_text = f"按当前模型估计，{top_elem} 的离子电导率约为 {top_sigma:.3e} S/m，可作为比较不同温度或不同材料时的参考。"
+
+        rdf_text = "RDF 数据不足，暂时无法判断局部配位环境是否稳定。"
+        if rdf.get('g_pairs'):
+            pair, pair_info = next(iter(rdf['g_pairs'].items()))
+            peak = pair_info.get('peaks', [])
+            peak_text = f"，首峰大约在 {peak[0].get('r', 0):.2f} Å" if peak else ""
+            rdf_text = f"RDF 主要用来看原子彼此常见的距离和局部结构是否保持稳定。当前 {pair} 对已经识别到明显近邻关系{peak_text}。"
+
+        temperature_text = (
+            f"本次模拟温度大致在 {float(np.mean(temperatures)):.1f} K 附近。"
+            if temperatures
+            else "本次模拟没有足够的温度时间序列用于稳定性判断。"
+        )
+
+        diffusion_text = "这次没有得到可靠的扩散系数结果。"
+        if fastest:
+            elem, values = fastest
+            diffusion_text = (
+                f"扩散系数越大，通常说明该元素在模拟时间窗口内移动得越快。"
+                f" 这次最活跃的是 {elem}，其扩散系数约为 {values.get('D_m2_per_s', 0.0):.3e} m^2/s。"
+            )
+
+        return f"""
+  <div class="section">
+    <h2>🧭 通俗解读</h2>
+    <div class="note">
+      <p><strong>这份 MD 报告主要回答三件事：</strong> 原子有没有明显移动、局部结构有没有保持住、以及温度/能量是否大体平稳。</p>
+      <ul>
+        <li>{diffusion_text}</li>
+        <li>{conductivity_text}</li>
+        <li>{rdf_text}</li>
+        <li>{temperature_text} 需要注意的是，MD 看到的是有限时间尺度下的趋势，不能直接等同于宏观实验寿命或长期稳定性。</li>
+      </ul>
+    </div>
+  </div>
+        """
+
     def _diffusion_rows(self) -> str:
         diff = self.data.get('diffusion', {})
         rows = []
@@ -1822,7 +1908,42 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
     def _img(self, img64: str, title: str) -> str:
         if not img64:
             return '<div class="note">无图像</div>'
-        return f'<img alt="{title}" src="data:image/png;base64,{img64}" />'
+        return (
+            f'<img alt="{title}" src="data:image/png;base64,{img64}" />'
+            f'{self._png_download_link(f"{title}.png", img64)}'
+        )
+
+    def _chart_guide(self, key: str) -> str:
+        guides = {
+            'msd': (
+                "怎么看这张图：MSD 曲线抬升越快，通常说明对应元素在当前模拟时间窗里移动得越明显；"
+                "如果几条曲线长期贴近 0，往往表示扩散不明显。"
+            ),
+            'arrhenius': (
+                "怎么看这张图：Arrhenius 图里温度升高后扩散系数如果整体上升，说明热激活扩散趋势更明显；"
+                "拟合越接近直线，通常说明这组温度下的扩散行为越接近经典热激活模型。"
+            ),
+            'rdf_all': (
+                "怎么看这张图：RDF 的峰越尖锐、位置越稳定，通常说明局部结构越固定；"
+                "如果峰逐渐变宽或变矮，往往表示局部有序性在减弱。"
+            ),
+            'rdf_first_peak_evolution': (
+                "怎么看这张图：首峰位置如果长期比较稳定，通常说明最近邻原子距离没有明显漂移；"
+                "如果首峰持续移动，可能意味着局部结构正在重排。"
+            ),
+            'stability': (
+                "怎么看这张图：如果能量、温度、压力只是在小范围波动，通常说明模拟过程比较平稳；"
+                "如果出现长时间漂移或突然尖峰，就值得回头检查体系是否还没进入稳定采样阶段。"
+            ),
+            'lattice_density': (
+                "怎么看这张图：如果晶格参数、体积和密度整体变化不大，通常说明体系没有出现明显的体相结构漂移；"
+                "如果这些量持续偏移，往往意味着热膨胀、相变或数值不稳定值得进一步检查。"
+            ),
+        }
+        text = guides.get(key)
+        if not text:
+            return ''
+        return f'<div class="info-box" style="margin-top: 12px;"><strong>{text}</strong></div>'
 
     def _generate_rdf_table(self, g_pairs: Dict[str, Dict[str, Any]]) -> str:
         """生成RDF配位数汇总表格"""
@@ -1898,15 +2019,16 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
             if not pairs:
                 continue
 
-            html_parts.append(f'<h4>{group_name}</h4>')
-            html_parts.append('<div class="rdf-grid">')
+            rendered_cards = []
 
             for pair in pairs:
                 chart_key = f'rdf_{pair}'
                 img64 = charts.get(chart_key, '')
+                if not img64:
+                    continue
                 cn = g_pairs[pair].get('coordination_number', 0)
 
-                html_parts.append(f'''
+                rendered_cards.append(f'''
                     <div class="rdf-card">
                         <div class="rdf-card-header">
                             <h5>{pair}</h5>
@@ -1916,7 +2038,14 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
                     </div>
                 ''')
 
-            html_parts.append('</div>')
+            if rendered_cards:
+                html_parts.append(f'<h4>{group_name}</h4>')
+                html_parts.append('<div class="rdf-grid">')
+                html_parts.extend(rendered_cards)
+                html_parts.append('</div>')
+
+        if not html_parts:
+            return '<div class="note">当前没有可展示的元素对 RDF 图像；系统仅展示分析成功且已生成图像的元素对。</div>'
 
         return ''.join(html_parts)
 
@@ -2120,6 +2249,8 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
         # 电导率表格
         diff = self.data.get('diffusion', {})
         conductivity = diff.get('ionic_conductivity_S_per_m', {}) or {}
+        arrh = self.data.get('arrhenius') or diff.get('arrhenius_single', {}) or {}
+        t_list = arrh.get('T_list_K', []) or []
         cond_rows = ''
         if conductivity:
             cond_rows = '\n'.join([
@@ -2135,20 +2266,44 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
             </div>
         """
 
-        return f"""
-  <div class="section">
-    <h2>📈 扩散性质</h2>
-    <div class="grid-2">
-      <div>
-        <h3>MSD（按元素）</h3>
-        {self._img(charts.get('msd', ''), 'msd')}
-        {self._msd_csv_link()}
-      </div>
+        arrhenius_panel = ""
+        if charts.get('arrhenius'):
+            arrhenius_panel = f"""
       <div>
         <h3>Arrhenius（多温聚合时显示）</h3>
         {self._img(charts.get('arrhenius', ''), 'arrhenius')}
+        {self._chart_guide('arrhenius')}
         {self._arrhenius_csv_link()}
       </div>
+            """
+        elif len(t_list) > 1:
+            arrhenius_panel = f"""
+      <div>
+        <h3>Arrhenius（多温聚合时显示）</h3>
+        <div class="note">检测到多温度数据，但本次未成功生成 Arrhenius 图，可先下载 CSV 再做进一步检查。</div>
+        {self._arrhenius_csv_link()}
+      </div>
+            """
+
+        diffusion_panels = f"""
+      <div>
+        <h3>MSD（按元素）</h3>
+        {self._img(charts.get('msd', ''), 'msd')}
+        {self._chart_guide('msd') if charts.get('msd') else ''}
+        {self._msd_csv_link()}
+      </div>
+        """
+        if arrhenius_panel:
+            diffusion_wrapper_class = "grid-2"
+            diffusion_panels += arrhenius_panel
+        else:
+            diffusion_wrapper_class = ""
+
+        return f"""
+  <div class="section">
+    <h2>📈 扩散性质</h2>
+    <div class="{diffusion_wrapper_class}">
+      {diffusion_panels}
     </div>
     {conductivity_table}
   </div>
@@ -2156,7 +2311,7 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
 
     def _rdf_csv_link(self, r_array: list, g_pairs: Dict[str, Any], filename: str = 'rdf_data.csv') -> str:
         """生成RDF数据的CSV下载链接（所有元素对）"""
-        if not r_array or not g_pairs:
+        if r_array is None or len(r_array) == 0 or not g_pairs:
             return ''
         pair_names = list(g_pairs.keys())
         headers = ['r(Å)'] + [f'g(r)_{p}' for p in pair_names]
@@ -2196,11 +2351,13 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
       <div>
         <h3>总 RDF</h3>
         {self._img(charts.get('rdf_all', ''), 'rdf_all')}
+        {self._chart_guide('rdf_all') if charts.get('rdf_all') else ''}
         {rdf_dl}
       </div>
       <div>
         <h3>首峰演化</h3>
         {self._img(charts.get('rdf_first_peak_evolution', ''), 'rdf_first_peak_evolution')}
+        {self._chart_guide('rdf_first_peak_evolution') if charts.get('rdf_first_peak_evolution') else ''}
       </div>
     </div>
 
@@ -2281,11 +2438,13 @@ class MDHTMLReportGenerator(BaseHTMLGenerator):
       <div>
         <h3>能量/温度/压力</h3>
         {self._img(charts.get('stability', ''), 'stability')}
+        {self._chart_guide('stability') if charts.get('stability') else ''}
         {self._stability_csv_link()}
       </div>
       <div>
         <h3>晶格/密度</h3>
         {self._img(charts.get('lattice_density', ''), 'lattice_density')}
+        {self._chart_guide('lattice_density') if charts.get('lattice_density') else ''}
         {self._lattice_csv_link()}
       </div>
     </div>

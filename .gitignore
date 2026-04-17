@@ -30,6 +30,21 @@ tmp/
 
 # Local environment/secrets
 .env
+*.pem
+*.key
 
 # Logs
 *.log
+
+# Local databases and runtime artifacts
+tasks.db
+*.sqlite
+*.sqlite3
+public_artifacts/
+vasp_calculations/
+
+# Uploaded or generated archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
