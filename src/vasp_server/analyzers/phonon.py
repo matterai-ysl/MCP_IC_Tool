@@ -180,12 +180,36 @@ class PhononHTMLGenerator(BaseHTMLGenerator):
         </div>
         """
 
+        interpretation = (
+            "没有看到虚频，通常说明这个结构在当前小扰动下不会自发滑向另一种构型，可视为动力学稳定。"
+            if stable else
+            f"检测到 {phonon.get('n_imaginary', 0)} 个虚频，通常说明这个结构在某些振动方向上还不够稳，可能会自发畸变到另一种更稳定的结构。"
+        )
+        html += f"""
+        <div class="section">
+          <h2>🧭 通俗解读</h2>
+          <div class="summary-card">
+            <p><strong>声子结果最重要看虚频。</strong> 虚频可以理解成“沿某个方向轻轻一推，结构会自己滑走”的信号。</p>
+            <ul>
+              <li>{interpretation}</li>
+              <li>如果你的目标是筛选稳定晶体，通常会优先希望看到“没有虚频”。</li>
+              <li>如果只是 Γ 点声子结果正常，也不代表整个布里渊区都一定没有软模，但它已经能提供一个很有用的初步稳定性判断。</li>
+            </ul>
+          </div>
+        </div>
+        """
+
         hist_img = self.data.get('visualizations', {}).get('phonon_hist')
         if hist_img:
+            png_dl = self._png_download_link('phonon_histogram.png', hist_img)
             html += f"""
         <div class="section">
           <h2>声子频率分布图</h2>
           <img src="data:image/png;base64,{hist_img}" style="max-width:100%;">
+          <div style="margin-top: 12px; padding: 12px 14px; background: #f7fafc; border-left: 4px solid #4299e1; border-radius: 6px; color: #2d3748;">
+            <strong>怎么看这张图：</strong> 先看有没有落在 0 以下的频率；0 以下就是虚频，数量越多、绝对值越大，通常说明结构越可能继续畸变。0 以上的峰主要反映不同振动模式的硬软程度。
+          </div>
+          {png_dl}
         </div>
             """
 

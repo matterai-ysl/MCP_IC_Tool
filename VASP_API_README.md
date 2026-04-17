@@ -1,5 +1,7 @@
 # VASP 结构优化 API 文档
 
+> 注意：这是早期 API 文档，部分 `formula`、Materials Project 和 `calc_type` 描述已经不是当前分布式主链路。GitHub 交接与后续 bugfix 请优先阅读 `README.md`、`CLAUDE.md` 和 `docs/runbooks/session-handoff.md`。
+
 ## 概述
 
 这是一个基于 FastAPI 的 VASP 结构优化计算服务，支持通过化学式或 CIF 文件 URL 提交结构优化任务，并提供完整的任务管理功能。
@@ -324,4 +326,4 @@ bsub < vasp_job.lsf
 
 ---
 
-*最后更新: 2024年1月* 
+*最后更新: 2024年1月；2026-04-17 增加旧文档提示。* 

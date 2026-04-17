@@ -10,6 +10,14 @@ class ObjectStorageLocation:
 
 
 @dataclass(frozen=True)
+class LocalPublicArtifactLocation:
+    storage_key: str
+    object_key: str
+    bucket: Optional[str] = None
+    storage_backend: str = "local_public"
+
+
+@dataclass(frozen=True)
 class RegisteredArtifact:
     task_id: str
     artifact_type: str

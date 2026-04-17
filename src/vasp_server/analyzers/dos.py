@@ -1502,8 +1502,10 @@ class PyMatGenDOSHTMLGenerator(BaseHTMLGenerator):
             + self._generate_structure_analysis()
             + self._generate_dos_analysis()
             + self._generate_band_structure_analysis()
+            + self._generate_plain_language_interpretation()
             + self._generate_chemical_analysis()
             + self._generate_magnetic_analysis()
+            + self._generate_recommendations()
             + self._generate_visualization_section(charts_data)
         )
 
@@ -1809,6 +1811,71 @@ class PyMatGenDOSHTMLGenerator(BaseHTMLGenerator):
         </div>
         """
 
+    def _generate_plain_language_interpretation(self) -> str:
+        """生成面向非计算用户的通俗解读。"""
+        dos = self.data.get('dos_analysis', {})
+        band = self.data.get('band_structure', {})
+        gap = dos.get('band_gap', 0.0) or 0.0
+        is_metal = bool(dos.get('is_metal', False))
+        material_type = dos.get('material_type', 'unknown')
+        spin_polarized = bool(dos.get('is_spin_polarized', False))
+        orbital = dos.get('orbital_analysis', {}) or {}
+
+        if is_metal:
+            headline = "这更像金属：费米能级附近还有很多可用电子态，电子更容易流动。"
+        elif gap < 0.5:
+            headline = f"这更像窄带隙半导体：带隙约 {gap:.2f} eV，通常更容易被热或红外光激发。"
+        elif gap < 3.0:
+            headline = f"这更像半导体：带隙约 {gap:.2f} eV，常用于理解光电或电子器件趋势。"
+        else:
+            headline = f"这更像绝缘体/宽带隙材料：带隙约 {gap:.2f} eV，常见于绝缘、介电或紫外响应场景。"
+
+        dominant_parts = []
+        for element, orbitals in orbital.items():
+            if not isinstance(orbitals, dict):
+                continue
+            orbital_values = {k: v for k, v in orbitals.items() if isinstance(v, (int, float))}
+            if not orbital_values:
+                continue
+            main_orbital = max(orbital_values, key=orbital_values.get)
+            main_weight = orbital_values[main_orbital]
+            if main_weight > 0:
+                dominant_parts.append(f"{element} 的 {main_orbital} 轨道")
+
+        orbital_text = (
+            f"费米能级附近的态主要来自 {'、'.join(dominant_parts[:2])}。"
+            if dominant_parts
+            else "当前报告没有足够的轨道分解信息，暂时只能判断总体电子态分布。"
+        )
+
+        spin_text = (
+            "同时看到自旋极化，说明自旋向上和向下的电子态分布不同，可继续关注磁性或自旋电子学潜力。"
+            if spin_polarized
+            else "没有明显自旋极化信号，通常说明磁性特征不强或这次计算没有显示明显磁性分裂。"
+        )
+
+        material_text = {
+            "metal": "如果你关心导电性，这类结果通常意味着电子更容易通过材料。",
+            "semiconductor": "如果你关心光电应用，这类结果通常值得继续结合能带和吸收性质一起看。",
+            "insulator": "如果你关心绝缘或介电用途，这类结果通常是一个积极信号。",
+        }.get(material_type, "这份结果更适合先判断材料是导电、半导体还是绝缘，再决定下一步分析。")
+
+        return f"""
+        <div class="section">
+            <h2>🧭 通俗解读</h2>
+            <div class="info-box">
+                <h4>怎么理解这份 DOS 结果</h4>
+                <p>{headline}</p>
+                <ul>
+                    <li>{material_text}</li>
+                    <li>{orbital_text}</li>
+                    <li>{spin_text}</li>
+                    <li>DOS 更像是在看“哪些能量位置有多少电子态”，它能帮助理解导电性和带隙来源，但<strong>不等于器件最终性能</strong>。</li>
+                </ul>
+            </div>
+        </div>
+        """
+
     def _dos_csv_link(self, raw_dos_data: Dict[str, Any], keys: List[str], filename: str) -> str:
         """从 raw_dos_data 中提取指定 keys 并生成 CSV 下载链接。"""
         if not raw_dos_data:
@@ -1866,10 +1933,36 @@ class PyMatGenDOSHTMLGenerator(BaseHTMLGenerator):
         elem_dl = self._dos_csv_link(raw, elem_keys, 'element_dos.csv') if elem_keys else ''
         spd_dl = self._dos_csv_link(raw, elem_keys, 'spd_dos.csv') if elem_keys else ''
 
-        def img_block(title: str, img64: str, dl_link: str) -> str:
+        def chart_guide(title: str) -> str:
+            guides = {
+                "总态密度": (
+                    "怎么看这张图：横轴是相对费米能级的能量，纵轴是该能量附近可用电子态的多少。"
+                    " 先看 0 eV（费米能级）附近，如果这里态密度很多，材料通常更容易导电；如果这里接近空白，往往意味着存在带隙。"
+                ),
+                "元素分解DOS": (
+                    "怎么看这张图：它把总态密度拆到不同元素上。"
+                    " 重点看哪种元素在带边附近贡献更高，这通常就是决定带隙来源、导电性和化学活性的关键元素。"
+                ),
+                "SPD轨道DOS": (
+                    "怎么看这张图：它把电子态按 s、p、d、f 轨道拆开。"
+                    " 重点看 s、p、d、f 哪类轨道主导带边，常能帮助判断成键方式，以及材料更偏离子型、共价型还是过渡金属 d 电子主导。"
+                ),
+                "能带结构": (
+                    "怎么看这张图：如果这里显示的是能带信息，可以把它理解为电子能量随动量路径的变化。"
+                    " 曲线越分散，电子通常越容易移动；曲线越平坦，电子往往更局域。"
+                ),
+            }
+            text = guides.get(title, "")
+            if not text:
+                return ""
+            return f'<div class="info-box"><strong>{text}</strong></div>'
+
+        def img_block(title: str, img64: str, dl_link: str, png_filename: str) -> str:
             return (
                 f'<div><h3>{title}</h3>'
                 f'<div class="image-container"><img src="data:image/png;base64,{img64}" alt="{title}"></div>'
+                f'{chart_guide(title)}'
+                f'{self._png_download_link(png_filename, img64)}'
                 f'{dl_link}</div>'
             )
 
@@ -1878,10 +1971,10 @@ class PyMatGenDOSHTMLGenerator(BaseHTMLGenerator):
             <h2>📈 PyMatGen 专业可视化</h2>
 
             <div class="grid-2">
-                {img_block('总态密度', total_dos, tdos_dl) if total_dos else ''}
-                {img_block('元素分解DOS', element_dos, elem_dl) if element_dos else ''}
-                {img_block('SPD轨道DOS', spd_dos, spd_dl) if spd_dos else ''}
-                {img_block('能带结构', band_plot, '') if band_plot else ''}
+                {img_block('总态密度', total_dos, tdos_dl, 'total_dos.png') if total_dos else ''}
+                {img_block('元素分解DOS', element_dos, elem_dl, 'element_dos.png') if element_dos else ''}
+                {img_block('SPD轨道DOS', spd_dos, spd_dl, 'spd_dos.png') if spd_dos else ''}
+                {img_block('能带结构', band_plot, '', 'band_structure.png') if band_plot else ''}
             </div>
         </div>
         """
@@ -1892,7 +1985,10 @@ class PyMatGenDOSHTMLGenerator(BaseHTMLGenerator):
         img64 = charts_data.get(key, '')
         if not img64:
             return "<div class=\"image-container\"><em>无可用图像</em></div>"
-        return f"<div class=\"image-container\"><img src=\"data:image/png;base64,{img64}\" alt=\"{key}\"></div>"
+        return (
+            f"<div class=\"image-container\"><img src=\"data:image/png;base64,{img64}\" alt=\"{key}\"></div>"
+            f"{self._png_download_link(f'{key}.png', img64)}"
+        )
 
     def _generate_recommendations(self) -> str:
         """生成建议部分"""

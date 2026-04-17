@@ -1,9 +1,11 @@
 import asyncio
 from pathlib import Path
+import tempfile
 
 import httpx
 
 from src.vasp_server.hpc_pull_worker import PullWorker
+from src.vasp_server.settings import settings
 from src.vasp_server.task_manager.models import Task
 
 
@@ -68,6 +70,29 @@ class DirectControlPlaneClient:
     def cancel_ack(self, task_id: str, lease_token: str):
         self.task_manager.ack_cancel(task_id, lease_token, self.worker_id)
 
+    def upload_public_artifact(self, task_id: str, filename: str, local_path: str, content_type: str | None = None):
+        task = self.task_manager.get_task(task_id, "test_user")
+        assert task is not None
+        location = self.task_manager.storage_service.build_public_location(
+            tenant_id=str(task.tenant_id),
+            task_id=task_id,
+            attempt_no=1,
+            filename=filename,
+        )
+        target = Path(location.storage_key)
+        if not target.is_absolute():
+            target = Path(tempfile.gettempdir()) / "mcp-ic-tool-public-artifacts-e2e" / location.object_key
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(Path(local_path).read_bytes())
+        return {
+            "storage_backend": "local_public",
+            "storage_key": str(target),
+            "object_key": location.object_key,
+            "download_url": f"{settings.public_artifact_base_url.rstrip('/')}/{location.object_key}",
+            "content_type": content_type,
+            "size_bytes": float(Path(local_path).stat().st_size),
+        }
+
 
 class FakeStructureWorker:
     def __init__(self, root: Path):
@@ -129,7 +154,7 @@ def test_end_to_end_structure_optimization_flow(tmp_path):
     assert status_response.status_code == 200
     assert payload["status"] == "completed"
     assert payload["html_report_url"].startswith("https://")
-    assert payload["artifacts"][0]["download_url"].startswith("https://")
+    assert any(item["download_url"] and item["download_url"].startswith("https://") for item in payload["artifacts"])
 
 
 def test_end_to_end_scf_stays_on_upstream_queue_and_cancel_running_task(tmp_path, db_session):

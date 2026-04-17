@@ -164,12 +164,51 @@ class NEBHTMLGenerator(BaseHTMLGenerator):
         </div>
         """
 
+        if isinstance(fwd, float):
+            if fwd < 0.3:
+                barrier_text = f"正向能垒约 {fwd:.3f} eV，通常说明这条迁移/反应路径相对容易发生。"
+            elif fwd < 0.8:
+                barrier_text = f"正向能垒约 {fwd:.3f} eV，说明这条路径可以发生，但往往需要一定热激发。"
+            else:
+                barrier_text = f"正向能垒约 {fwd:.3f} eV，说明这条路径相对不容易发生。"
+        else:
+            barrier_text = "这次没有得到可靠的势垒高度，暂时无法判断反应或扩散是否容易发生。"
+
+        if isinstance(rxn, float):
+            if rxn < 0:
+                reaction_text = f"反应能约 {rxn:.3f} eV，表示产物侧整体更低能、热力学上更有利。"
+            elif rxn > 0:
+                reaction_text = f"反应能约 +{rxn:.3f} eV，表示产物侧更高能、热力学上不如初态有利。"
+            else:
+                reaction_text = "反应能接近 0，说明初态和末态能量非常接近。"
+        else:
+            reaction_text = "这次没有得到可靠的初末态能量差。"
+
+        html += f"""
+        <div class="section">
+          <h2>🧭 通俗解读</h2>
+          <div class="summary-card">
+            <p><strong>NEB 最重要的是看“翻山”有多难。</strong> 这里的势垒可以理解成体系从初态走到末态时需要跨过的能量山峰。</p>
+            <ul>
+              <li><strong>能垒越低</strong>，通常说明这条迁移或反应路径<strong>更容易发生</strong>；能垒越高，则往往更难发生。</li>
+              <li>{barrier_text}</li>
+              <li>{reaction_text}</li>
+            </ul>
+          </div>
+        </div>
+        """
+
         profile_img = self.data.get('visualizations', {}).get('neb_profile')
         if profile_img:
+            png_dl = self._png_download_link('neb_profile.png', profile_img)
             html += f"""
         <div class="section">
           <h2>能量曲线图</h2>
           <img src="data:image/png;base64,{profile_img}" style="max-width:100%;">
+          <div style="margin-top: 12px; padding: 12px 14px; background: #f7fafc; border-left: 4px solid #4299e1; border-radius: 6px; color: #2d3748;">
+            <strong>怎么看这张图：</strong> 横轴是反应路径上的图像序号，纵轴是相对能量；曲线最高点通常就是最难跨过去的能量山峰，首尾的高度差则反映初态和末态谁更稳定。
+          </div>
+          {png_dl}
         </div>
             """
 

@@ -12,11 +12,15 @@ TASK_TYPE_TO_DISPLAY_NAME = {
     "structure_optimization": "结构优化计算",
     "scf_calculation": "SCF 计算",
     "dos_calculation": "DOS 计算",
+    "dos_analysis": "DOS 分析",
     "band_structure": "能带计算",
+    "band_structure_analysis": "能带分析",
     "md_calculation": "分子动力学计算",
+    "md_analysis": "分子动力学分析",
     "neb_calculation": "NEB 计算",
     "phonon_calculation": "声子计算",
     "custom_calculation": "自定义计算",
+    "agent_analysis": "Agent 智能分析",
 }
 
 
@@ -31,6 +35,7 @@ def build_task_notification_payload(
     execution_time_seconds: Optional[float] = None,
     result_summary: Optional[str] = None,
     error_message: Optional[str] = None,
+    html_report_url: Optional[str] = None,
     to_email: Optional[str] = None,
 ) -> Dict[str, Any]:
     context: Dict[str, Any] = {
@@ -46,6 +51,8 @@ def build_task_notification_payload(
         context["result_summary"] = result_summary
     if error_message:
         context["error_message"] = error_message
+    if html_report_url:
+        context["html_report_url"] = html_report_url
 
     payload: Dict[str, Any] = {
         "notification_type": notification_type,

@@ -35,6 +35,16 @@ class ControlPlaneClient:
         response.raise_for_status()
         return response.json()
 
+    def resume(self, task_id: str) -> dict[str, Any]:
+        response = self.session.post(
+            f"{self.base_url}/internal/tasks/{task_id}/resume",
+            json={"worker_id": self.worker_id, "queue_name": self.queue_name},
+            headers=self._headers,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def mark_running(self, task_id: str, lease_token: str) -> dict[str, Any]:
         response = self.session.post(
             f"{self.base_url}/internal/tasks/{task_id}/running",
@@ -84,5 +94,25 @@ class ControlPlaneClient:
             headers=self._headers,
             timeout=self.timeout,
         )
+        response.raise_for_status()
+        return response.json()
+
+    def upload_public_artifact(
+        self,
+        task_id: str,
+        filename: str,
+        local_path: str,
+        content_type: str | None = None,
+    ) -> dict[str, Any]:
+        with open(local_path, "rb") as fh:
+            headers = dict(self._headers)
+            if content_type:
+                headers["Content-Type"] = content_type
+            response = self.session.put(
+                f"{self.base_url}/internal/tasks/{task_id}/artifacts/{filename.lstrip('/')}",
+                data=fh.read(),
+                headers=headers,
+                timeout=self.timeout,
+            )
         response.raise_for_status()
         return response.json()

@@ -209,8 +209,9 @@ python -c "from src.vasp_server.hpc_pull_worker import PullWorker; PullWorker(wo
 - `VASP_PATH`
 - `PSEUDO_PATH`
 - `SLURM_*`
-- `ONEAPI_ENV_SCRIPT`
-- `VASP_SLURM_RUN_LINE`
+- `SLURM_MODULE_LOAD`：可选，仅在集群必须 `module load` 时设置
+- `ONEAPI_ENV_SCRIPT`：可选，仅在集群必须额外 source 环境时设置
+- `VASP_SLURM_RUN_LINE`：可选，留空时会默认执行 `mpirun -np $SLURM_NPROCS <VASP_PATH>`
 
 ### 5. Submit And Query A Task
 

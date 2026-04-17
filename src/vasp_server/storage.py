@@ -1,9 +1,10 @@
 import hashlib
 import hmac
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from .settings import settings
-from .storage_models import ObjectStorageLocation
+from .storage_models import LocalPublicArtifactLocation, ObjectStorageLocation
 
 
 class ObjectStorageService:
@@ -62,6 +63,17 @@ class ObjectStorageService:
             content_type=None,
             expires_in=expires_in,
         )
+
+    def build_public_location(self, tenant_id: str, task_id: str, attempt_no: int, filename: str) -> LocalPublicArtifactLocation:
+        prefix = self.build_task_prefix(tenant_id=tenant_id, task_id=task_id, attempt_no=attempt_no)
+        clean_filename = filename.lstrip("/")
+        object_key = f"{prefix}/{clean_filename}"
+        storage_key = str((Path(settings.local_public_artifact_root) / object_key).resolve())
+        return LocalPublicArtifactLocation(storage_key=storage_key, object_key=object_key)
+
+    def create_public_download_url(self, object_key: str) -> str:
+        base = settings.public_artifact_base_url.rstrip("/")
+        return f"{base}/{quote(object_key)}"
 
     def _signed_url(
         self,

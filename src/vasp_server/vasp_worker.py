@@ -3,15 +3,22 @@ import shutil
 import asyncio
 import traceback
 import logging
+import json
+import shlex
+import tarfile
+import zipfile
 from typing import Dict, Any, Optional, List
 import requests
 from pathlib import Path
 import subprocess
 import time
+from html import escape as html_escape
+from urllib.parse import urlsplit
 
 from .base import cif_to_poscar
 from .Config import get_path_config, get_kpoints_config,get_static_url,get_download_url, DOWNLOAD_URL
 from .input_resolver import UpstreamInputResolver
+from .settings import settings
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -28,6 +35,320 @@ class VaspWorker:
         self.base_work_dir = Path(base) / user_id  # 为每个用户创建独立目录
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
         self.input_resolver = UpstreamInputResolver()
+
+    @staticmethod
+    def _normalize_slurm_state(raw_state: str) -> str:
+        if not raw_state:
+            return ""
+        return raw_state.strip().split()[0].split("+")[0].upper()
+
+    @staticmethod
+    def _detect_runtime_execution_error(result_log: str) -> Optional[str]:
+        checks = [
+            ("PMI server not found", "MPI/Slurm 集成异常: PMI server not found，请检查 I_MPI_PMI_LIBRARY 与 srun --mpi 配置"),
+            ("error while loading shared libraries", "运行时依赖缺失: 请检查动态库环境配置"),
+            ("BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES", "MPI 运行异常终止: 请检查并行启动配置"),
+        ]
+        for marker, message in checks:
+            if marker in result_log:
+                return message
+        return None
+
+    @staticmethod
+    def _has_valid_structure_optimization_output(
+        analysis_data: Dict[str, Any],
+        *,
+        converged: bool = False,
+        final_energy: Optional[float] = None,
+        has_optimized_structure: bool = False,
+    ) -> bool:
+        convergence = analysis_data.get("convergence_analysis", {})
+        force_info = convergence.get("force_convergence", {})
+        if force_info.get("available") and force_info.get("force_history"):
+            return True
+        process = analysis_data.get("optimization_process", {})
+        if bool(process.get("data_available")) and process.get("total_steps", 0) > 0:
+            return True
+
+        # Some highly symmetric structures can converge immediately or within an
+        # almost invisible ionic trajectory. In that case the report may have no
+        # usable force-history blocks, but a real convergence tail marker and
+        # final energy still indicate a valid successful run.
+        tail_matched = bool(convergence.get("tail_check", {}).get("matched"))
+        energy_info = convergence.get("energy_convergence", {})
+        has_energy_signal = (
+            energy_info.get("final_energy") is not None
+            or bool(energy_info.get("energy_history"))
+            or final_energy is not None
+        )
+        return (converged or tail_matched) and has_energy_signal and has_optimized_structure
+
+    def _resolve_source_work_directory(self, params: Dict[str, Any]) -> Path:
+        source_task_id = str(params.get("source_task_id") or "").strip()
+        explicit_work_dir = str(params.get("source_work_directory") or "").strip()
+        if source_task_id:
+            return self._resolve_task_work_directory(
+                source_task_id,
+                explicit_work_dir=explicit_work_dir,
+                task_label="源任务",
+            )
+        raise FileNotFoundError("未提供 source_task_id 或 source_work_directory")
+
+    def _resolve_task_work_directory(
+        self,
+        task_id: str,
+        *,
+        explicit_work_dir: Optional[str] = None,
+        task_label: str = "任务",
+    ) -> Path:
+        if not task_id and not explicit_work_dir:
+            raise FileNotFoundError(f"未提供 {task_label} 的 task_id 或工作目录")
+
+        candidates: List[Path] = []
+        if explicit_work_dir:
+            candidates.append(Path(explicit_work_dir))
+        if task_id:
+            candidates.append(self.base_work_dir / task_id)
+
+            for root in [self.base_work_dir.parent, Path(settings.vasp_work_root)]:
+                if not root:
+                    continue
+                candidates.append(root / task_id)
+                if root.exists():
+                    candidates.extend(sorted(path for path in root.glob(f"*/{task_id}") if path.is_dir()))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate_key = str(candidate)
+            if candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            if candidate.exists():
+                return candidate
+
+        if task_id:
+            raise FileNotFoundError(f"{task_label} {task_id} 的工作目录不存在")
+        raise FileNotFoundError(f"未提供 {task_label} 的 task_id 或工作目录")
+
+    @staticmethod
+    def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _safe_copy_if_exists(source: Path, destination: Path) -> None:
+        if not source.exists():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    def _create_analysis_result(
+        self,
+        *,
+        task_id: str,
+        work_dir: Path,
+        html_path: Optional[Path],
+        summary: Dict[str, Any],
+        extra: Optional[Dict[str, Any]] = None,
+        started_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "success": True,
+            "work_directory": str(work_dir),
+            "html_report_url": str(html_path) if html_path else None,
+            "summary": summary,
+        }
+        payload.update(summary)
+        if extra:
+            payload.update(extra)
+        if started_at is not None:
+            payload["computation_time"] = max(0.0, time.perf_counter() - started_at)
+        self._write_json(work_dir / "analysis_summary.json", payload)
+        return payload
+
+    async def run_dos_analysis(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = work_dir / "dos_analysis"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source_work_dir = self._resolve_source_work_directory(params)
+        started_at = time.perf_counter()
+
+        if progress_callback:
+            await progress_callback(10, "开始 DOS 分析任务...")
+            await progress_callback(30, "解析 DOS 输出文件...")
+
+        from .analyzers.dos import PyMatGenDOSAnalyzer, PyMatGenDOSHTMLGenerator
+
+        analyzer = PyMatGenDOSAnalyzer(str(source_work_dir), task_id=task_id, output_dir=str(output_dir))
+        data = analyzer.analyze()
+        generator = PyMatGenDOSHTMLGenerator(data)
+        html_path = Path(generator.generate_html_report(str(output_dir / "pymatgen_dos_analysis_report.html")))
+
+        summary = {
+            "band_gap": data.get("final_results", {}).get("band_gap"),
+            "fermi_energy": data.get("final_results", {}).get("fermi_energy"),
+            "is_metal": data.get("final_results", {}).get("is_metal"),
+            "total_energy": data.get("final_results", {}).get("total_energy"),
+        }
+        if progress_callback:
+            await progress_callback(100, "DOS 分析完成")
+        return self._create_analysis_result(
+            task_id=task_id,
+            work_dir=work_dir,
+            html_path=html_path,
+            summary=summary,
+            extra={"source_task_id": params.get("source_task_id")},
+            started_at=started_at,
+        )
+
+    async def run_band_structure_analysis(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = work_dir / "BS_output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source_work_dir = self._resolve_source_work_directory(params)
+        started_at = time.perf_counter()
+
+        if progress_callback:
+            await progress_callback(10, "开始能带分析任务...")
+            await progress_callback(35, "解析能带结果...")
+
+        from .analyzers.band_structure import BandStructureAnalyzer, BandStructureHTMLGenerator
+
+        analyzer = BandStructureAnalyzer(str(source_work_dir), task_id=task_id)
+        data = analyzer.analyze()
+        html_path = output_dir / "band_structure_report.html"
+        BandStructureHTMLGenerator(data).generate_html_report(str(html_path))
+        self._write_json(output_dir / "band_structure_summary.json", data.get("final_results", {}))
+
+        summary = {
+            "band_gap": data.get("final_results", {}).get("band_gap"),
+            "is_direct": data.get("final_results", {}).get("is_direct"),
+            "is_metal": data.get("final_results", {}).get("is_metal"),
+            "vbm": data.get("final_results", {}).get("vbm"),
+            "cbm": data.get("final_results", {}).get("cbm"),
+            "fermi_energy": data.get("final_results", {}).get("fermi_energy"),
+            "total_energy": data.get("final_results", {}).get("total_energy"),
+        }
+        if progress_callback:
+            await progress_callback(100, "能带分析完成")
+        return self._create_analysis_result(
+            task_id=task_id,
+            work_dir=work_dir,
+            html_path=html_path,
+            summary=summary,
+            extra={"source_task_id": params.get("source_task_id")},
+            started_at=started_at,
+        )
+
+    async def run_md_analysis(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = work_dir / "MD_output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source_work_dir = self._resolve_source_work_directory(params)
+        started_at = time.perf_counter()
+
+        if progress_callback:
+            await progress_callback(10, "开始 MD 分析任务...")
+            await progress_callback(35, "解析 MD 轨迹与统计量...")
+
+        from .analyzers.md import VASP_MDAnalyzer
+
+        analyzer = VASP_MDAnalyzer(str(source_work_dir), task_id=task_id, output_dir=str(output_dir))
+        data = analyzer.analyze()
+        html_path = output_dir / "md_analysis_report.html"
+
+        summary = {
+            "convergence": data.get("final_results", {}).get("convergence"),
+            "final_energy": data.get("final_results", {}).get("final_energy"),
+            "average_temperature": data.get("final_results", {}).get("average_temperature"),
+            "total_md_steps": data.get("final_results", {}).get("total_md_steps"),
+        }
+        if progress_callback:
+            await progress_callback(100, "MD 分析完成")
+        return self._create_analysis_result(
+            task_id=task_id,
+            work_dir=work_dir,
+            html_path=html_path,
+            summary=summary,
+            extra={"source_task_id": params.get("source_task_id")},
+            started_at=started_at,
+        )
+
+    async def run_agent_analysis(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        work_dir = self.base_work_dir / task_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = work_dir / "agent_analysis"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source_work_dir = self._resolve_source_work_directory(params)
+        started_at = time.perf_counter()
+        question = str(params.get("question") or "").strip()
+        model_name = str(params.get("model") or "qwen3.5-plus")
+
+        if not question:
+            raise ValueError("agent_analysis 缺少 question")
+
+        if progress_callback:
+            await progress_callback(10, "开始 Agent 分析任务...")
+            await progress_callback(35, "执行 Agent 分析...")
+
+        from .analysis_agent import run_analysis
+
+        result = await run_analysis(str(source_work_dir), question, model_name)
+
+        generated_plot_urls: List[str] = []
+        for filename in result.get("generated_plots", []):
+            src_plot = source_work_dir / filename
+            dst_plot = output_dir / filename
+            self._safe_copy_if_exists(src_plot, dst_plot)
+            if dst_plot.exists():
+                generated_plot_urls.append(dst_plot.name)
+
+        html_lines = [
+            "<!DOCTYPE html>",
+            "<html lang=\"zh-CN\">",
+            "<head><meta charset=\"utf-8\" /><title>Agent 分析报告</title></head>",
+            "<body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:32px;color:#0f172a;\">",
+            "<h1>Agent 分析报告</h1>",
+            f"<p><strong>模型:</strong> {html_escape(model_name)}</p>",
+            f"<p><strong>问题:</strong> {html_escape(question)}</p>",
+            f"<p><strong>执行步数:</strong> {int(result.get('steps') or 0)}</p>",
+            "<h2>分析结论</h2>",
+            f"<pre style=\"white-space:pre-wrap;background:#f8fafc;padding:16px;border-radius:12px;\">{html_escape(str(result.get('answer') or ''))}</pre>",
+        ]
+        if generated_plot_urls:
+            html_lines.append("<h2>生成图表</h2>")
+            for filename in generated_plot_urls:
+                html_lines.append(
+                    f"<div style=\"margin-bottom:20px;\"><img src=\"{html_escape(filename)}\" alt=\"{html_escape(filename)}\" style=\"max-width:100%;border:1px solid #e2e8f0;border-radius:12px;\" /></div>"
+                )
+        html_lines.append("</body></html>")
+
+        html_path = output_dir / "agent_analysis_report.html"
+        html_path.write_text("\n".join(html_lines), encoding="utf-8")
+        self._write_json(output_dir / "agent_analysis_result.json", result)
+
+        summary = {
+            "steps": int(result.get("steps") or 0),
+        }
+        if progress_callback:
+            await progress_callback(100, "Agent 分析完成")
+        return self._create_analysis_result(
+            task_id=task_id,
+            work_dir=work_dir,
+            html_path=html_path,
+            summary=summary,
+            extra={
+                "source_task_id": params.get("source_task_id"),
+                "answer": result.get("answer", ""),
+                "steps": int(result.get("steps") or 0),
+                "generated_plots": generated_plot_urls,
+                "agent_analysis_report_html_path": str(html_path),
+            },
+            started_at=started_at,
+        )
     
     async def run_structure_optimization(self, task_id: str, params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """
@@ -72,7 +393,7 @@ class VaspWorker:
             # 5. 分析结果
             if progress_callback:
                 await progress_callback(90, "分析计算结果...")
-            final_result = await self._analyze_results(work_dir, result)
+            final_result = await self._analyze_results(task_id, work_dir, result)
             
             if progress_callback:
                 await progress_callback(100, "计算完成！")
@@ -163,21 +484,28 @@ class VaspWorker:
             dos_files = await self._prepare_dos_files(work_dir, params, progress_callback)
             if not dos_files:
                 raise Exception("无法准备DOS计算文件")
+            if dos_files.get("_dos_input_mode") and not params.get("_dos_input_mode"):
+                params["_dos_input_mode"] = dos_files["_dos_input_mode"]
+            if dos_files.get("_dos_seed_incar_path") and not params.get("_dos_seed_incar_path"):
+                params["_dos_seed_incar_path"] = dos_files["_dos_seed_incar_path"]
             
             # 2. 生成DOS计算输入文件
+            reuse_charge_density = bool(
+                params.get('scf_task_id') or dos_files.get("_dos_input_mode") == "bundle_with_chgcar"
+            )
             if progress_callback:
-                if params.get('scf_task_id'):
+                if reuse_charge_density:
                     await progress_callback(30, "生成态密度VASP输入文件...")
                     await self._generate_dos_inputs(work_dir, params, dos_files)
                 else:
                     await progress_callback(25, "单点自洽+DOS输入文件已准备完成")
             else:
-                if params.get('scf_task_id'):
+                if reuse_charge_density:
                     await self._generate_dos_inputs(work_dir, params, dos_files)
             
             # 3. 运行VASP计算
             if progress_callback:
-                if params.get('scf_task_id'):
+                if reuse_charge_density:
                     await progress_callback(40, "开始VASP态密度计算...")
                 else:
                     await progress_callback(30, "开始单点自洽+DOS计算...")
@@ -223,9 +551,25 @@ class VaspWorker:
             if not bs_files:
                 raise Exception("无法准备能带结构计算文件")
 
+            if bs_files.get("_band_input_mode") == "seed_scf":
+                if progress_callback:
+                    await progress_callback(22, "先执行内部SCF以生成CHGCAR...")
+                await self._prepare_scf_then_band_structure_files(work_dir, params)
+                seed_result = await self._run_vasp_calculation(work_dir, progress_callback)
+                chgcar_path = work_dir / "CHGCAR"
+                if seed_result.get("success") is False or not chgcar_path.exists() or chgcar_path.stat().st_size == 0:
+                    raise Exception("内部SCF预计算失败，未生成有效的 CHGCAR")
+                params["_band_seed_incar_path"] = str(work_dir / "INCAR")
+                bs_files["_band_input_mode"] = "seed_scf_completed"
+                params["_band_input_mode"] = "seed_scf_completed"
+                params["_band_has_seed_chgcar"] = True
+
             # 2. 生成能带结构计算输入文件
             if progress_callback:
                 await progress_callback(30, "生成能带结构VASP输入文件...")
+            params.setdefault("_band_input_mode", bs_files.get("_band_input_mode"))
+            if bs_files.get("_band_seed_incar_path") and not params.get("_band_seed_incar_path"):
+                params["_band_seed_incar_path"] = bs_files["_band_seed_incar_path"]
             await self._generate_band_structure_inputs(work_dir, params, bs_files)
 
             # 3. 运行VASP计算
@@ -323,9 +667,10 @@ class VaspWorker:
 
     async def _get_cif_file(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """获取CIF文件"""
-        if params.get('cif_url'):
+        source_url = params.get('cif_url') or params.get('input_url')
+        if source_url:
             # 从URL下载
-            cif_url = params['cif_url']
+            cif_url = source_url
             if progress_callback:
                 await progress_callback(15, f"从URL下载结构文件: {cif_url}")
             
@@ -339,6 +684,262 @@ class VaspWorker:
             return str(cif_path)
         
         return None
+
+    @staticmethod
+    def _safe_extract_zip(archive_path: Path, extract_dir: Path) -> None:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for member in zf.namelist():
+                member_path = (extract_dir / member).resolve()
+                if not str(member_path).startswith(str(extract_dir.resolve())):
+                    raise Exception(f"压缩包包含非法路径: {member}")
+            zf.extractall(extract_dir)
+
+    @staticmethod
+    def _safe_extract_tar(archive_path: Path, extract_dir: Path) -> None:
+        with tarfile.open(str(archive_path), "r:*") as tf:
+            for member in tf.getmembers():
+                member_path = (extract_dir / member.name).resolve()
+                if not str(member_path).startswith(str(extract_dir.resolve())):
+                    raise Exception(f"压缩包包含非法路径: {member.name}")
+            tf.extractall(extract_dir)
+
+    @staticmethod
+    def _find_named_file(root: Path, *names: str) -> Optional[Path]:
+        expected = {name.lower() for name in names}
+        for path in root.rglob("*"):
+            if path.is_file() and path.name.lower() in expected:
+                return path
+        return None
+
+    @staticmethod
+    def _find_first_cif(root: Path) -> Optional[Path]:
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() == ".cif":
+                return path
+        return None
+
+    @staticmethod
+    def _normalize_input_urls(input_url: Any) -> List[str]:
+        if input_url is None:
+            return []
+        if isinstance(input_url, list):
+            return [str(item) for item in input_url if str(item).strip()]
+        return [str(input_url)]
+
+    async def _download_input_url(self, download_dir: Path, input_url: str, index: int = 0) -> Path:
+        download_dir.mkdir(parents=True, exist_ok=True)
+        filename = os.path.basename(urlsplit(str(input_url)).path) or f"input_file_{index}"
+        target = download_dir / filename
+        if target.exists():
+            target = download_dir / f"{index}_{filename}"
+        response = requests.get(str(input_url), timeout=60)
+        response.raise_for_status()
+        with open(target, "wb") as fh:
+            fh.write(response.content)
+        return target
+
+    async def _download_input_urls(self, work_dir: Path, input_url: Any) -> List[Path]:
+        download_dir = work_dir / "_input_source"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        input_urls = self._normalize_input_urls(input_url)
+        if not input_urls:
+            raise Exception("缺少 input_url")
+
+        downloaded_paths: List[Path] = []
+        for index, url in enumerate(input_urls, start=1):
+            downloaded_paths.append(await self._download_input_url(download_dir, url, index))
+        return downloaded_paths
+
+    async def _materialize_structure_source_to_poscar(
+        self,
+        source_path: Path,
+        work_dir: Path,
+        params: Dict[str, Any],
+    ) -> str:
+        suffix = source_path.suffix.lower()
+        if suffix == ".cif":
+            cif_target = work_dir / "structure.cif"
+            shutil.copy(str(source_path), str(cif_target))
+            return await self._convert_cif_to_poscar(str(cif_target), work_dir, params)
+
+        poscar_path = work_dir / "POSCAR"
+        shutil.copy(str(source_path), str(poscar_path))
+        return str(poscar_path)
+
+    async def _prepare_band_structure_files_from_input_url(
+        self,
+        work_dir: Path,
+        params: Dict[str, Any],
+        progress_callback=None,
+    ) -> Dict[str, str]:
+        input_url = params.get("input_url")
+        if not input_url:
+            raise Exception("缺少 input_url")
+
+        downloaded_paths = await self._download_input_urls(work_dir, input_url)
+        source_root = downloaded_paths[0].parent
+
+        for downloaded_path in downloaded_paths:
+            if zipfile.is_zipfile(downloaded_path):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_zip(downloaded_path, extract_dir)
+            elif tarfile.is_tarfile(str(downloaded_path)):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_tar(downloaded_path, extract_dir)
+
+        children = [child for child in source_root.iterdir()] if source_root.exists() else []
+        if len(children) == 1 and children[0].is_dir():
+            source_root = children[0]
+
+        poscar_source = self._find_named_file(source_root, "POSCAR", "CONTCAR")
+        potcar_source = self._find_named_file(source_root, "POTCAR")
+        chg_source = self._find_named_file(source_root, "CHG")
+        chgcar_source = self._find_named_file(source_root, "CHGCAR")
+        wavecar_source = self._find_named_file(source_root, "WAVECAR")
+        incar_source = self._find_named_file(source_root, "INCAR")
+
+        if poscar_source and potcar_source and chgcar_source:
+            copied_files: Dict[str, str] = {
+                "POSCAR": str(shutil.copy(str(poscar_source), str(work_dir / "POSCAR"))),
+                "POTCAR": str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR"))),
+                "CHGCAR": str(shutil.copy(str(chgcar_source), str(work_dir / "CHGCAR"))),
+                "_band_input_mode": "bundle_with_chgcar",
+            }
+            if chg_source:
+                copied_files["CHG"] = str(shutil.copy(str(chg_source), str(work_dir / "CHG")))
+            if wavecar_source:
+                copied_files["WAVECAR"] = str(shutil.copy(str(wavecar_source), str(work_dir / "WAVECAR")))
+            if incar_source:
+                seed_incar_path = work_dir / "seed_INCAR"
+                shutil.copy(str(incar_source), str(seed_incar_path))
+                copied_files["_band_seed_incar_path"] = str(seed_incar_path)
+            return copied_files
+
+        structure_source = poscar_source or self._find_first_cif(source_root)
+        if structure_source is None:
+            raise Exception("输入URL中未找到可用的结构文件，且未检测到带 CHGCAR 的标准输入包")
+
+        copied_files = {
+            "POSCAR": await self._materialize_structure_source_to_poscar(structure_source, work_dir, params),
+            "_band_input_mode": "seed_scf",
+        }
+        if potcar_source:
+            copied_files["POTCAR"] = str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR")))
+        if incar_source:
+            seed_incar_path = work_dir / "seed_INCAR"
+            shutil.copy(str(incar_source), str(seed_incar_path))
+            copied_files["_band_seed_incar_path"] = str(seed_incar_path)
+        return copied_files
+
+    async def _prepare_dos_files_from_input_url(
+        self,
+        work_dir: Path,
+        params: Dict[str, Any],
+    ) -> Dict[str, str]:
+        input_url = params.get("input_url")
+        if not input_url:
+            raise Exception("缺少 input_url")
+
+        downloaded_paths = await self._download_input_urls(work_dir, input_url)
+        source_root = downloaded_paths[0].parent
+
+        for downloaded_path in downloaded_paths:
+            if zipfile.is_zipfile(downloaded_path):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_zip(downloaded_path, extract_dir)
+            elif tarfile.is_tarfile(str(downloaded_path)):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_tar(downloaded_path, extract_dir)
+
+        children = [child for child in source_root.iterdir()] if source_root.exists() else []
+        if len(children) == 1 and children[0].is_dir():
+            source_root = children[0]
+
+        poscar_source = self._find_named_file(source_root, "POSCAR", "CONTCAR")
+        potcar_source = self._find_named_file(source_root, "POTCAR")
+        chg_source = self._find_named_file(source_root, "CHG")
+        chgcar_source = self._find_named_file(source_root, "CHGCAR")
+        wavecar_source = self._find_named_file(source_root, "WAVECAR")
+        incar_source = self._find_named_file(source_root, "INCAR")
+
+        if poscar_source and potcar_source and chgcar_source:
+            copied_files: Dict[str, str] = {
+                "POSCAR": str(shutil.copy(str(poscar_source), str(work_dir / "POSCAR"))),
+                "POTCAR": str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR"))),
+                "CHGCAR": str(shutil.copy(str(chgcar_source), str(work_dir / "CHGCAR"))),
+                "_dos_input_mode": "bundle_with_chgcar",
+            }
+            if chg_source:
+                copied_files["CHG"] = str(shutil.copy(str(chg_source), str(work_dir / "CHG")))
+            if wavecar_source:
+                copied_files["WAVECAR"] = str(shutil.copy(str(wavecar_source), str(work_dir / "WAVECAR")))
+            if incar_source:
+                seed_incar_path = work_dir / "seed_INCAR"
+                shutil.copy(str(incar_source), str(seed_incar_path))
+                copied_files["_dos_seed_incar_path"] = str(seed_incar_path)
+            return copied_files
+
+        structure_source = poscar_source or self._find_first_cif(source_root)
+        if structure_source is None:
+            raise Exception("输入URL中未找到可用的 DOS 结构文件，且未检测到带 CHGCAR 的标准输入包")
+
+        copied_files = {
+            "POSCAR": await self._materialize_structure_source_to_poscar(structure_source, work_dir, params),
+            "_dos_input_mode": "single_point",
+        }
+        if potcar_source:
+            copied_files["POTCAR"] = str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR")))
+        return copied_files
+
+    async def _prepare_md_files_from_input_url(
+        self,
+        work_dir: Path,
+        params: Dict[str, Any],
+    ) -> Dict[str, str]:
+        input_url = params.get("input_url")
+        if not input_url:
+            raise Exception("缺少 input_url")
+
+        downloaded_paths = await self._download_input_urls(work_dir, input_url)
+        source_root = downloaded_paths[0].parent
+
+        for downloaded_path in downloaded_paths:
+            if zipfile.is_zipfile(downloaded_path):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_zip(downloaded_path, extract_dir)
+            elif tarfile.is_tarfile(str(downloaded_path)):
+                extract_dir = source_root / f"{downloaded_path.stem}_extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                self._safe_extract_tar(downloaded_path, extract_dir)
+
+        children = [child for child in source_root.iterdir()] if source_root.exists() else []
+        if len(children) == 1 and children[0].is_dir():
+            source_root = children[0]
+
+        poscar_source = self._find_named_file(source_root, "POSCAR", "CONTCAR")
+        potcar_source = self._find_named_file(source_root, "POTCAR")
+
+        if poscar_source and potcar_source:
+            return {
+                "POSCAR": str(shutil.copy(str(poscar_source), str(work_dir / "POSCAR"))),
+                "POTCAR": str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR"))),
+            }
+
+        structure_source = poscar_source or self._find_first_cif(source_root)
+        if structure_source is None:
+            raise Exception("输入URL中未找到可用的 MD 结构文件")
+
+        copied_files = {
+            "POSCAR": await self._materialize_structure_source_to_poscar(structure_source, work_dir, params),
+        }
+        if potcar_source:
+            copied_files["POTCAR"] = str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR")))
+        return copied_files
     
     async def _get_structure_for_scf(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[str]:
         """为自洽场计算获取结构文件"""
@@ -357,8 +958,7 @@ class VaspWorker:
                 await progress_callback(15, "从结构优化任务获取优化后结构...")
             
             optimized_task_id = params['optimized_task_id']
-            # 构建优化任务的工作目录路径
-            opt_work_dir = self.base_work_dir / optimized_task_id
+            opt_work_dir = self._resolve_task_work_directory(optimized_task_id, task_label="优化任务")
             contcar_path = opt_work_dir / "CONTCAR"
             
             if not contcar_path.exists():
@@ -400,8 +1000,11 @@ class VaspWorker:
                 await progress_callback(15, "从自洽场计算任务获取结果文件...")
             
             scf_task_id = params['scf_task_id']
-            # 构建自洽场任务的工作目录路径
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
             
             # 需要复制的文件列表 (按照vasp(1).py中的逻辑)
             required_files = ["POSCAR", "POTCAR", "CHG", "CHGCAR", "WAVECAR"]
@@ -422,26 +1025,21 @@ class VaspWorker:
             
             return copied_files
             
-        elif params.get('cif_url'):
-            # 从CIF URL进行单点自洽+DOS计算（一步完成）
+        elif params.get('input_url'):
             if progress_callback:
-                await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
-            
-            # 获取CIF并转换为POSCAR
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-            
-            # 生成单点自洽+DOS的输入文件
-            if progress_callback:
-                await progress_callback(20, "准备单点自洽+DOS计算文件...")
-            await self._prepare_single_point_dos_files(work_dir, params)
-            
-            return {"POSCAR": str(poscar_path)}
+                await progress_callback(10, "下载并解析 DOS 输入...")
+
+            dos_files = await self._prepare_dos_files_from_input_url(work_dir, params)
+
+            if dos_files.get("_dos_input_mode") != "bundle_with_chgcar":
+                if progress_callback:
+                    await progress_callback(20, "准备单点自洽+DOS计算文件...")
+                await self._prepare_single_point_dos_files(work_dir, params)
+
+            return dos_files
         
         else:
-            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 input_url 或 scf_task_id 中的一个")
     
     async def _prepare_band_structure_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为能带结构计算准备文件"""
@@ -459,9 +1057,13 @@ class VaspWorker:
                 await progress_callback(15, "从自洽场计算任务获取结果文件...")
 
             scf_task_id = params['scf_task_id']
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
 
-            required_files = ["POSCAR", "POTCAR", "CHG", "CHGCAR"]
+            required_files = ["POSCAR", "POTCAR", "CHG", "CHGCAR", "WAVECAR"]
             copied_files = {}
 
             for filename in required_files:
@@ -476,26 +1078,21 @@ class VaspWorker:
                     logger.warning("文件不存在: %s", src_path)
                     if filename in ["POSCAR", "POTCAR", "CHGCAR"]:
                         raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
-
+            scf_incar_path = scf_work_dir / "INCAR"
+            if scf_incar_path.exists():
+                seed_incar_path = work_dir / "seed_INCAR"
+                shutil.copy(str(scf_incar_path), str(seed_incar_path))
+                copied_files["_band_seed_incar_path"] = str(seed_incar_path)
+            copied_files["_band_input_mode"] = "scf_task"
             return copied_files
 
-        elif params.get('cif_url'):
+        elif params.get('input_url'):
             if progress_callback:
-                await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
-
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-
-            if progress_callback:
-                await progress_callback(20, "准备SCF+能带结构计算文件...")
-            await self._prepare_scf_then_band_structure_files(work_dir, params)
-
-            return {"POSCAR": str(poscar_path)}
+                await progress_callback(10, "下载并解析能带输入...")
+            return await self._prepare_band_structure_files_from_input_url(work_dir, params, progress_callback)
 
         else:
-            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 input_url 或 scf_task_id 中的一个")
 
     async def _prepare_md_files(self, work_dir: Path, params: Dict[str, Any], progress_callback=None) -> Optional[Dict[str, str]]:
         """为分子动力学计算准备文件"""
@@ -513,7 +1110,11 @@ class VaspWorker:
                 await progress_callback(15, "从自洽场计算任务获取结果文件...")
             
             scf_task_id = params['scf_task_id']
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
             
             # MD计算只需要POSCAR和POTCAR (按照vasp(1).py的逻辑)
             required_files = ["POSCAR", "POTCAR"]
@@ -533,33 +1134,28 @@ class VaspWorker:
             
             return copied_files
             
-        elif params.get('cif_url'):
-            # 从CIF URL进行纯MD计算（一步完成）
+        elif params.get('input_url'):
             if progress_callback:
-                await progress_callback(10, f"从URL下载CIF: {params['cif_url']}")
-            
-            # 获取CIF并转换为POSCAR
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
-            
-            # 生成纯MD的输入文件
+                await progress_callback(10, "下载并解析 MD 输入...")
+
+            md_files = await self._prepare_md_files_from_input_url(work_dir, params)
+
             if progress_callback:
                 await progress_callback(20, "准备纯MD计算文件...")
             await self._prepare_single_point_md_files(work_dir, params)
-            
-            return {"POSCAR": str(poscar_path)}
+
+            return md_files
         
         else:
-            raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
+            raise Exception("必须提供 input_url 或 scf_task_id 中的一个")
     
     async def _prepare_single_point_md_files(self, work_dir: Path, params: Dict[str, Any]):
         """准备纯MD计算的输入文件"""
         from .base import generate_potcar
         
         # 1. 生成POTCAR
-        generate_potcar(str(work_dir))
+        if not (work_dir / "POTCAR").exists():
+            generate_potcar(str(work_dir))
         
         # 2. 生成固定的MD KPOINTS (1 1 1)
         await self._generate_md_kpoints(work_dir)
@@ -856,12 +1452,13 @@ LANGEVIN_GAMMA = 10.0
         from .base import generate_kpoints, generate_potcar
         
         # 1. 生成KPOINTS (DOS计算使用更密的网格)
-        generate_kpoints(str(work_dir))
-        kpoint_multiplier = params.get('kpoint_multiplier', 2.0)
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 20.0)))
+        kpoint_multiplier = params.get('kpoint_multiplier', 1.5)
         await self._apply_kpoint_multiplier(work_dir, kpoint_multiplier)
         
         # 2. 生成POTCAR
-        generate_potcar(str(work_dir))
+        if not (work_dir / "POTCAR").exists():
+            generate_potcar(str(work_dir))
         
         # 3. 生成单点自洽+DOS的INCAR
         await self._generate_single_point_dos_incar(work_dir, params)
@@ -901,7 +1498,7 @@ LANGEVIN_GAMMA = 10.0
         """生成单点自洽+DOS的INCAR文件"""
         from .base import generate_incar
         
-        precision = params.get('precision', 'Accurate')
+        precision = params.get('precision', 'High')
 
         # 先生成基础INCAR
         generate_incar(str(work_dir))
@@ -938,13 +1535,13 @@ LANGEVIN_GAMMA = 10.0
         
         # 添加DOS专用设置
         new_lines.append("\n# 自洽场设置\n")
-        new_lines.append("EDIFF = 1E-6\n")    # 严格的电子收敛
-        new_lines.append("NELMIN = 4\n")      # 最小电子步数
-        new_lines.append("NELM = 200\n")      # 更多电子步数
+        new_lines.append("EDIFF = 1E-5\n")    # 轻量默认下的电子收敛
+        new_lines.append("NELMIN = 2\n")      # 最小电子步数
+        new_lines.append("NELM = 120\n")      # 避免默认过重
         
         new_lines.append("\n# 态密度计算设置\n")
         new_lines.append("LORBIT = 11\n")     # 轨道分辨态密度
-        new_lines.append("NEDOS = 2000\n")    # 能量网格点数
+        new_lines.append("NEDOS = 1500\n")    # 能量网格点数
         new_lines.append("EMIN = -20\n")      # 能量范围最小值
         new_lines.append("EMAX = 10\n")       # 能量范围最大值
         
@@ -972,7 +1569,7 @@ LANGEVIN_GAMMA = 10.0
         from .base import generate_kpoints, generate_potcar, generate_incar
 
         # 生成KPOINTS
-        generate_kpoints(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 15.0)))
 
         # 生成POTCAR
         generate_potcar(str(work_dir))
@@ -990,7 +1587,7 @@ LANGEVIN_GAMMA = 10.0
         precision = params.get('precision', 'Accurate')
 
         # 生成KPOINTS (自洽场计算通常使用更密的K点网格)
-        generate_kpoints(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 30.0)))
 
         # 生成POTCAR
         generate_potcar(str(work_dir))
@@ -1074,11 +1671,22 @@ LANGEVIN_GAMMA = 10.0
     async def _modify_incar_for_dos(self, work_dir: Path, params: Dict[str, Any]):
         """修改INCAR文件用于态密度计算"""
         
+        precision = params.get('precision', 'High')
+        reuse_charge_density = bool(
+            params.get('scf_task_id') or params.get("_dos_input_mode") == "bundle_with_chgcar"
+        )
+        seed_incar_path = params.get("_dos_seed_incar_path")
+        preserve_precision = False
+
         # 查找源INCAR文件
         scf_task_id = params.get('scf_task_id')
         if scf_task_id:
             # 从SCF任务复制INCAR
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
             scf_incar_path = scf_work_dir / "INCAR"
             
             if not scf_incar_path.exists():
@@ -1087,6 +1695,11 @@ LANGEVIN_GAMMA = 10.0
             # 读取SCF的INCAR
             with open(scf_incar_path, 'r') as f:
                 lines = f.readlines()
+            preserve_precision = True
+        elif seed_incar_path and Path(seed_incar_path).exists():
+            with open(seed_incar_path, 'r') as f:
+                lines = f.readlines()
+            preserve_precision = True
         else:
             # 生成基础INCAR
             from .base import generate_incar
@@ -1104,6 +1717,13 @@ LANGEVIN_GAMMA = 10.0
             # 修改DOS计算专用设置
             if stripped.startswith("SYSTEM"):
                 new_lines.append("SYSTEM = DOS\n")
+            elif stripped.startswith("PREC"):
+                # Reusing a CHGCAR requires keeping FFT-grid-related settings as
+                # close as possible to the source task/input.
+                if preserve_precision or reuse_charge_density:
+                    new_lines.append(line if line.endswith("\n") else f"{line}\n")
+                else:
+                    new_lines.append(f"PREC = {precision}\n")
             elif stripped.startswith("NSW"):
                 new_lines.append("NSW = 0\n")  # DOS不进行离子步
             elif stripped.startswith("IBRION"):
@@ -1123,8 +1743,11 @@ LANGEVIN_GAMMA = 10.0
         
         # 添加DOS专用设置
         new_lines.append("\n# 态密度计算专用设置\n")
+        new_lines.append("EDIFF = 1E-5\n")  # 轻量默认下的电子收敛
+        new_lines.append("NELMIN = 2\n")
+        new_lines.append("NELM = 120\n")
         new_lines.append("LORBIT = 11\n")  # 计算轨道分辨态密度
-        new_lines.append("NEDOS = 2000\n")  # 能量网格点数
+        new_lines.append("NEDOS = 1500\n")  # 能量网格点数
         new_lines.append("EMIN = -20\n")   # 能量范围最小值
         new_lines.append("EMAX = 10\n")    # 能量范围最大值
         
@@ -1139,12 +1762,16 @@ LANGEVIN_GAMMA = 10.0
         """生成DOS计算的KPOINTS文件"""
         
         # 获取K点倍增因子
-        kpoint_multiplier = params.get('kpoint_multiplier', 2.0)
+        kpoint_multiplier = params.get('kpoint_multiplier', 1.5)
         
         # 查找优化任务的KPOINTS作为基础
         scf_task_id = params.get('scf_task_id')
         if scf_task_id:
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
             
             # 尝试找到对应的优化任务KPOINTS
             # 按照vasp(1).py的逻辑，需要从"1-opt"目录获取KPOINTS
@@ -1182,7 +1809,7 @@ LANGEVIN_GAMMA = 10.0
         
         # 如果无法从原有KPOINTS倍增，则生成新的
         from .base import generate_kpoints
-        generate_kpoints(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 20.0)))
         logger.info("已生成默认DOS KPOINTS")
 
     async def _generate_band_structure_inputs(self, work_dir: Path, params: Dict[str, Any], bs_files: Dict[str, str]):
@@ -1200,9 +1827,16 @@ LANGEVIN_GAMMA = 10.0
     async def _modify_incar_for_band_structure(self, work_dir: Path, params: Dict[str, Any]):
         """修改INCAR文件用于能带结构计算"""
 
+        precision = params.get('precision', 'High')
         scf_task_id = params.get('scf_task_id')
+        seed_incar_path = params.get("_band_seed_incar_path")
+        preserve_precision = False
         if scf_task_id:
-            scf_work_dir = self.base_work_dir / scf_task_id
+            scf_work_dir = self._resolve_task_work_directory(
+                scf_task_id,
+                explicit_work_dir=str(params.get("scf_work_directory") or "").strip() or None,
+                task_label="SCF任务",
+            )
             scf_incar_path = scf_work_dir / "INCAR"
 
             if not scf_incar_path.exists():
@@ -1210,6 +1844,11 @@ LANGEVIN_GAMMA = 10.0
 
             with open(scf_incar_path, 'r') as f:
                 lines = f.readlines()
+            preserve_precision = True
+        elif seed_incar_path and Path(seed_incar_path).exists():
+            with open(seed_incar_path, 'r') as f:
+                lines = f.readlines()
+            preserve_precision = True
         else:
             from .base import generate_incar
             generate_incar(str(work_dir))
@@ -1224,6 +1863,11 @@ LANGEVIN_GAMMA = 10.0
 
             if stripped.startswith("SYSTEM"):
                 new_lines.append("SYSTEM = BAND\n")
+            elif stripped.startswith("PREC"):
+                if preserve_precision:
+                    new_lines.append(line if line.endswith("\n") else f"{line}\n")
+                else:
+                    new_lines.append(f"PREC = {precision}\n")
             elif stripped.startswith("NSW"):
                 new_lines.append("NSW = 0\n")
             elif stripped.startswith("IBRION"):
@@ -1313,59 +1957,74 @@ LANGEVIN_GAMMA = 10.0
             raise Exception("需要安装 pymatgen 来生成高对称k路径: pip install pymatgen")
 
     async def _prepare_scf_then_band_structure_files(self, work_dir: Path, params: Dict[str, Any]):
-        """准备从头开始的SCF+能带结构计算输入文件
-
-        当没有scf_task_id时，先做一次SCF计算得到CHGCAR，
-        然后再做能带结构计算。这里生成的是能带结构的输入文件，
-        ICHARG=2表示从头计算电荷密度（非自洽读取模式）。
-        """
+        """为 band 任务的内部 seed SCF 准备输入文件。"""
         from .base import generate_kpoints, generate_potcar, generate_incar
 
-        # 1. 生成POTCAR
-        generate_potcar(str(work_dir))
-
-        # 2. 生成能带结构k路径
-        await self._generate_band_structure_kpoints(work_dir, params)
-
-        # 3. 生成INCAR（直接用能带结构模式，ICHARG=2从头算）
+        if not (work_dir / "POTCAR").exists():
+            generate_potcar(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 20.0)))
         generate_incar(str(work_dir))
 
         incar_path = work_dir / "INCAR"
         with open(incar_path, 'r') as f:
             lines = f.readlines()
 
+        precision = params.get('precision', 'High')
         new_lines = []
         for line in lines:
             stripped = line.strip().upper()
             if stripped.startswith("SYSTEM"):
-                new_lines.append("SYSTEM = BAND\n")
+                new_lines.append("SYSTEM = BAND_SCF\n")
+            elif stripped.startswith("PREC"):
+                new_lines.append(f"PREC = {precision}\n")
             elif stripped.startswith("NSW"):
                 new_lines.append("NSW = 0\n")
             elif stripped.startswith("IBRION"):
                 new_lines.append("IBRION = -1\n")
+            elif stripped.startswith("ICHARG"):
+                new_lines.append("ICHARG = 2\n")
             elif stripped.startswith("ISMEAR"):
                 new_lines.append("ISMEAR = 0\n")
+            elif stripped.startswith("SIGMA"):
+                new_lines.append("SIGMA = 0.05\n")
             elif stripped.startswith("LWAVE"):
-                new_lines.append("LWAVE = .FALSE.\n")
+                new_lines.append("LWAVE = .TRUE.\n")
             elif stripped.startswith("LCHARG"):
-                new_lines.append("LCHARG = .TRUE.\n")  # 保存电荷密度
+                new_lines.append("LCHARG = .TRUE.\n")
             else:
                 new_lines.append(line)
-
-        new_lines.append("\n# 能带结构计算\n")
-        new_lines.append("LORBIT = 11\n")
 
         with open(incar_path, 'w') as f:
             f.writelines(new_lines)
 
-        # 4. 应用自定义INCAR参数
         await self._apply_custom_incar(work_dir, params)
 
-        logger.info("SCF+能带结构输入文件已准备完成")
+        logger.info("Band 内部 seed SCF 输入文件已准备完成")
 
     async def _run_vasp_calculation(self, work_dir: Path, progress_callback=None) -> Dict[str, Any]:
         """运行VASP计算"""
         import re
+
+        async def _query_final_slurm_state(job_id: str) -> str:
+            sacct_process = await asyncio.create_subprocess_shell(
+                f"sacct -j {job_id} --format=State --noheader -P",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await sacct_process.communicate()
+            if sacct_process.returncode != 0:
+                return ""
+            lines = [self._normalize_slurm_state(line) for line in stdout.decode().splitlines() if line.strip()]
+            lines = [line for line in lines if line]
+            if not lines:
+                return ""
+            failed_states = {"FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL"}
+            if any(state in failed_states for state in lines):
+                return next(state for state in lines if state in failed_states)
+            if "COMPLETED" in lines:
+                return "COMPLETED"
+            return lines[0]
+
         start_time = time.time()
         
         # 提交作业
@@ -1373,14 +2032,22 @@ LANGEVIN_GAMMA = 10.0
             await progress_callback(35, "提交VASP作业...")
         
         # SLURM作业调度参数（可通过环境变量覆盖）
-        nodes = int(os.getenv("SLURM_NODES", "2"))  # 节点数
-        total_tasks = int(os.getenv("SLURM_NTASKS", "80"))  # 总任务数
-        tasks_per_node = int(os.getenv("SLURM_TASKS_PER_NODE", "40"))  # 每节点任务数
-        partition = os.getenv("SLURM_PARTITION", "p1")
-        time_limit = os.getenv("SLURM_TIME_LIMIT", "24:00:00")
-        module_load = os.getenv("SLURM_MODULE_LOAD", "vasp/6.3.2-intel")
-        oneapi_env_script = os.getenv("ONEAPI_ENV_SCRIPT", "/data/app/intel/oneapi-2023.2/setvars.sh")
-        run_line = os.getenv("VASP_SLURM_RUN_LINE", "mpirun -np $SLURM_NPROCS vasp_std>result.log 2>&1")
+        nodes = int(os.getenv("SLURM_NODES", str(settings.slurm_nodes)))  # 节点数
+        total_tasks = int(os.getenv("SLURM_NTASKS", str(settings.slurm_ntasks)))  # 总任务数
+        tasks_per_node = int(os.getenv("SLURM_TASKS_PER_NODE", str(settings.slurm_tasks_per_node)))  # 每节点任务数
+        partition = os.getenv("SLURM_PARTITION", settings.slurm_partition)
+        time_limit = os.getenv("SLURM_TIME_LIMIT", settings.slurm_time_limit)
+        module_load = (os.getenv("SLURM_MODULE_LOAD", settings.slurm_module_load or "") or "").strip() or None
+        oneapi_env_script = (os.getenv("ONEAPI_ENV_SCRIPT", settings.oneapi_env_script or "") or "").strip() or None
+        i_mpi_pmi_library = (os.getenv("I_MPI_PMI_LIBRARY", settings.i_mpi_pmi_library or "") or "").strip() or None
+        slurm_srun_mpi = (os.getenv("SLURM_SRUN_MPI", settings.slurm_srun_mpi or "") or "").strip() or None
+        vasp_path = os.getenv("VASP_PATH", settings.vasp_path)
+        if slurm_srun_mpi:
+            default_run_line = f"srun --mpi={slurm_srun_mpi} {shlex.quote(vasp_path)} >result.log 2>&1"
+        else:
+            default_run_line = f"mpirun -np $SLURM_NPROCS {shlex.quote(vasp_path)}>result.log 2>&1"
+        configured_run_line = (os.getenv("VASP_SLURM_RUN_LINE", settings.vasp_slurm_run_line or "") or "").strip()
+        run_line = configured_run_line or default_run_line
         
         script = f"""#!/bin/bash
 #SBATCH -N {nodes}
@@ -1395,6 +2062,7 @@ LANGEVIN_GAMMA = 10.0
 
 {"module load " + module_load if module_load else ""}
 {"source " + oneapi_env_script + " >/dev/null 2>&1" if oneapi_env_script else ""}
+{"export I_MPI_PMI_LIBRARY=" + shlex.quote(i_mpi_pmi_library) if i_mpi_pmi_library else ""}
 ulimit -s unlimited
 ulimit -l unlimited
 
@@ -1466,9 +2134,24 @@ echo "VASP计算完成"
                     status = status_stdout.decode().strip()
                     
                     if status == "":
-                        # 作业不在队列中，可能已完成
-                        job_completed = True
-                        logger.info("作业已完成（不在队列中）")
+                        final_state = await _query_final_slurm_state(slurm_job_id)
+                        if final_state in {"PENDING", "RUNNING", "CONFIGURING"}:
+                            logger.info("作业已离开 squeue，但 sacct 显示仍为 %s，继续等待", final_state)
+                        else:
+                            job_completed = True
+                            logger.info("作业已离开 squeue，sacct 最终状态: %s", final_state or "UNKNOWN")
+                            if final_state and final_state != "COMPLETED":
+                                error_files = list(work_dir.glob("*.err"))
+                                error_msg = f"作业最终状态为 {final_state}"
+                                if error_files:
+                                    try:
+                                        with open(error_files[0], 'r') as f:
+                                            error_content = f.read()
+                                        if error_content.strip():
+                                            error_msg += f"\n错误日志:\n{error_content}"
+                                    except Exception:
+                                        pass
+                                raise Exception(error_msg)
                     elif status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"]:
                         job_completed = True
                         logger.info("作业状态: %s", status)
@@ -1499,9 +2182,14 @@ echo "VASP计算完成"
                         
                         logger.info("作业状态: %s", status)
                 else:
-                    # 查询失败，可能作业已完成
-                    logger.warning("无法查询作业状态，检查是否已完成")
-                    job_completed = True
+                    final_state = await _query_final_slurm_state(slurm_job_id)
+                    if final_state in {"PENDING", "RUNNING", "CONFIGURING"}:
+                        logger.warning("squeue 查询失败，但 sacct 显示作业仍为 %s，继续等待", final_state)
+                    else:
+                        logger.warning("无法查询作业状态，sacct 最终状态: %s", final_state or "UNKNOWN")
+                        job_completed = True
+                        if final_state and final_state != "COMPLETED":
+                            raise Exception(f"作业最终状态为 {final_state}")
                 
                 if not job_completed:
                     await asyncio.sleep(30)  # 每30秒检查一次
@@ -1528,6 +2216,10 @@ echo "VASP计算完成"
             if result_log_file.exists():
                 with open(result_log_file, 'r') as f:
                     result_log = f.read()
+
+            runtime_error = self._detect_runtime_execution_error(result_log)
+            if runtime_error:
+                raise Exception(runtime_error)
             
             end_time = time.time()
             computation_time = end_time - start_time
@@ -1557,7 +2249,7 @@ echo "VASP计算完成"
         """
         return script
 
-    async def _analyze_results(self, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
+    async def _analyze_results(self, task_id: str, work_dir: Path, vasp_result: Dict[str, Any]) -> Dict[str, Any]:
         """分析计算结果"""
         try:
             # 检查收敛性
@@ -1593,12 +2285,12 @@ echo "VASP计算完成"
                 if outcar_path.exists():
                     # 生成分析数据
                     logger.debug(f"生成分析数据: {work_dir}")
-                    analyzer = OUTCARAnalyzer(str(work_dir), task_id="optimization")
+                    analyzer = OUTCARAnalyzer(str(work_dir), task_id=task_id)
                     analysis_data = analyzer.analyze()
                     logger.debug(f"分析数据长度: {len(str(analysis_data))} 字符")
                     # 生成HTML报告
                     logger.debug(f"生成HTML报告: {work_dir}")
-                    html_report_path = generate_optimization_report(str(work_dir), "optimization")
+                    html_report_path = generate_optimization_report(str(work_dir), task_id)
                     logger.info(f"📊 结构优化分析报告已生成: {html_report_path}")
             except Exception as e:
                 logger.warning(f"⚠️ 生成可视化分析报告失败: {e}")
@@ -1640,6 +2332,20 @@ echo "VASP计算完成"
             if analysis_data:
                 result['analysis_data'] = analysis_data
 
+            optimization_error = None
+            if analysis_data and not self._has_valid_structure_optimization_output(
+                analysis_data,
+                converged=convergence,
+                final_energy=energy,
+                has_optimized_structure=optimized_structure is not None,
+            ):
+                optimization_error = "未解析到有效的结构优化离子步/力信息，输出异常，任务不能判定为成功"
+                runtime_error = self._detect_runtime_execution_error(vasp_result.get('stdout', ''))
+                if runtime_error:
+                    optimization_error = f"{optimization_error}；{runtime_error}"
+                result['success'] = False
+                result['error_message'] = optimization_error
+
             # 简化返回结果
             if analysis_data and 'convergence_analysis' in analysis_data:
                 # 使用详细分析数据
@@ -1655,6 +2361,8 @@ echo "VASP计算完成"
                     'computation_time': result['computation_time'],
                     'analysis_report_html_path': result.get('analysis_report_html_path', None),
                 }
+                if optimization_error:
+                    simplified_result['error_message'] = optimization_error
                 return simplified_result
             else:
                 # 如果没有分析数据，返回基础结果
@@ -1674,7 +2382,7 @@ echo "VASP计算完成"
                 f.seek(-1024, os.SEEK_END)
                 last_lines = f.readlines()[-10:]
                 last_content = b''.join(last_lines).decode('utf-8', errors='ignore')
-                return 'reached required accuracy' in last_content or 'Voluntary' in last_content
+                return 'reached required accuracy' in last_content
         except Exception:
             return False
     
@@ -2272,7 +2980,7 @@ echo "VASP计算完成"
                     logger.info("NEB 端点结构来自上游产物清单: %s", task_id_val)
                     return resolved[dest_name]
 
-                src_dir = self.base_work_dir / task_id_val
+                src_dir = self._resolve_task_work_directory(task_id_val, task_label="任务")
                 # 优先使用 CONTCAR（优化后结构），回退 POSCAR
                 for fname in ("CONTCAR", "POSCAR"):
                     src = src_dir / fname
@@ -2346,7 +3054,7 @@ echo "VASP计算完成"
 
         # 生成 POTCAR 和 KPOINTS 到 work_dir
         generate_potcar(str(work_dir))
-        generate_kpoints(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 15.0)))
 
         # 将 POTCAR 复制到每个图像子目录
         potcar_src = work_dir / "POTCAR"
@@ -2364,13 +3072,13 @@ IMAGES = {n_images}
 SPRING = -5
 LCLIMB = .TRUE.
 IBRION = 3
-NSW = 500
+NSW = 300
 POTIM = 0.5
 EDIFF = 1E-4
 EDIFFG = -0.05
 ISIF = 2
 ISYM = 0
-ENCUT = 520
+ENCUT = 450
 PREC = Normal
 ISMEAR = 0
 SIGMA = 0.05
@@ -2476,7 +3184,7 @@ LREAL = Auto
         if params.get('scf_task_id'):
             if progress_callback:
                 await progress_callback(15, "从 SCF 任务获取结构文件...")
-            scf_dir = self.base_work_dir / params['scf_task_id']
+            scf_dir = self._resolve_task_work_directory(params['scf_task_id'], task_label="SCF任务")
             for fname in ("POSCAR", "POTCAR"):
                 src = scf_dir / fname
                 if fname == "POTCAR" and not src.exists():
@@ -2508,10 +3216,10 @@ LREAL = Auto
         from .base import generate_kpoints
 
         displacement = float(params.get('displacement', 0.015))
-        kpoint_density = float(params.get('kpoint_density', 30.0))
+        kpoint_density = float(params.get('kpoint_density', 15.0))
 
         # KPOINTS（普通 Monkhorst-Pack，声子不需要高密度）
-        generate_kpoints(str(work_dir))
+        generate_kpoints(str(work_dir), target_product=kpoint_density)
 
         incar_path = work_dir / "INCAR"
         with open(incar_path, 'w') as f:
@@ -2520,13 +3228,12 @@ IBRION = 6
 NSW = 1
 NFREE = 2
 POTIM = {displacement}
-EDIFF = 1E-8
-ENCUT = 520
-PREC = Accurate
+EDIFF = 1E-6
+ENCUT = 450
+PREC = Normal
 ISMEAR = 0
-SIGMA = 0.01
-LREAL = .FALSE.
-ADDGRID = .TRUE.
+SIGMA = 0.05
+LREAL = Auto
 LWAVE = .FALSE.
 LCHARG = .FALSE.
 ISPIN = 2
@@ -2631,7 +3338,7 @@ GGA = PE
                 return
 
         if params.get('from_task_id'):
-            src_dir = self.base_work_dir / params['from_task_id']
+            src_dir = self._resolve_task_work_directory(params['from_task_id'], task_label="任务")
             for fname in ("CONTCAR", "POSCAR"):
                 src = src_dir / fname
                 if src.exists() and src.stat().st_size > 0:
@@ -2655,7 +3362,7 @@ GGA = PE
             logger.info("自定义KPOINTS: Gamma-only (1×1×1)")
         else:
             from .base import generate_kpoints
-            generate_kpoints(str(work_dir))
+            generate_kpoints(str(work_dir), target_product=float(params.get('kpoint_density', 30.0)))
             logger.info("自定义KPOINTS: MP网格（密度 %.1f）", params.get('kpoint_density', 30.0))
 
     async def _write_custom_incar(self, work_dir: Path, params: Dict[str, Any]) -> None:

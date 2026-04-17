@@ -84,13 +84,13 @@ def get_vasp_config():
 "DEFAULT": """
 # 基础控制
 SYSTEM = OPT
-PREC = High
-ENCUT = 520
+PREC = Normal
+ENCUT = 450
 ISTART = 0
 ICHARG = 2
 # 电子迭代
-EDIFF = 1E-5
-EDIFFG = -0.01
+EDIFF = 1E-4
+EDIFFG = -0.02
 NELM = 100
 NELMIN = 2
 ALGO = Normal
@@ -99,7 +99,7 @@ SIGMA = 0.05
 # 结构优化
 IBRION = 2
 NSW = 500
-ISIF = 3
+ISIF = 2
 POTIM = 0.2
 # 自旋极化与磁矩
 ISPIN = 2

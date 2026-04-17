@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastmcp import FastMCP, Context
 
@@ -73,14 +73,14 @@ async def submit_structure_optimization(
     Submit a structure optimization task and return task information.
 
     Default INCAR parameters (override any of them via custom_incar):
-      PREC=High, ENCUT=520, EDIFF=1E-5, EDIFFG=-0.01, NELM=100, NELMIN=2,
-      ALGO=Normal, ISMEAR=0, SIGMA=0.05, IBRION=2, NSW=500, ISIF=3,
+      PREC=Normal, ENCUT=450, EDIFF=1E-4, EDIFFG=-0.02, NELM=100, NELMIN=2,
+      ALGO=Normal, ISMEAR=0, SIGMA=0.05, IBRION=2, NSW=500, ISIF=2,
       POTIM=0.2, ISPIN=2, GGA=PE, LREAL=Auto, LWAVE=.FALSE., LCHARG=.FALSE.
-    LDA+U parameters are auto-generated based on the elements in the structure.
+    LDA+U 和 MAGMOM 会根据结构中的元素自动补齐。
 
     Parameters:
     - cif_url (required): URL address of the structure file
-    - kpoint_density (optional): K-point density parameter, default 30.0
+    - kpoint_density (optional): K-point density parameter, default 15.0
     - custom_incar (optional): Dict to override/add INCAR parameters.
       Examples: {"EDIFF": 1e-7, "ENCUT": 600}, {"IVDW": 12} to enable vdW correction
 
@@ -106,7 +106,7 @@ async def submit_scf_calculation(
     """
     Submit a self-consistent field (SCF) calculation task and return task information.
 
-    Default INCAR base is the same as optimization (PREC=High, ENCUT=520, etc.),
+    Default INCAR base is the same as optimization (PREC=Normal, ENCUT=450, etc.),
     then modified for SCF: NSW=0, IBRION=-1, LWAVE=.TRUE., LCHARG=.TRUE.
     Override any parameter via custom_incar.
 
@@ -130,7 +130,7 @@ async def submit_scf_calculation(
 
 @mcp.tool()
 async def submit_dos_calculation(
-    cif_url: Optional[str] = None,
+    input_url: Optional[Union[str, List[str]]] = None,
     scf_task_id: Optional[str] = None,
     queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
@@ -143,22 +143,26 @@ async def submit_dos_calculation(
     Submit a density of states (DOS) calculation task and return task information.
 
     Default INCAR for DOS: based on SCF settings, then modified with
-    ISMEAR=-5 (tetrahedron), LORBIT=11, NEDOS=2001, ICHARG=11, NSW=0, IBRION=-1.
-    K-point grid is multiplied by kpoint_multiplier (default 2x) relative to optimization.
+    ISMEAR=-5 (tetrahedron), LORBIT=11, NEDOS=1500, ICHARG=11, NSW=0, IBRION=-1.
+    K-point grid is multiplied by kpoint_multiplier (default 1.5x) relative to optimization.
     Override any parameter via custom_incar.
 
     Parameters:
-    - cif_url (optional): URL of structure file
+    - input_url (optional): Unified external input source. Supported forms:
+      1. Single structure file URL such as .cif, which runs single-point SCF + DOS.
+      2. Single zip/tar.gz bundle URL.
+      3. URL array such as [".../POSCAR", ".../POTCAR", ".../CHGCAR", ".../INCAR"].
+         If CHGCAR is available, DOS directly reuses it; otherwise the system runs SCF + DOS.
     - scf_task_id (optional): Completed SCF task ID
-    - kpoint_density (optional): default 30.0
-    - kpoint_multiplier (optional): K-point multiplier vs optimization, default 2.0
-    - precision (optional): "Normal"/"High"/"Accurate", default "Accurate"
+    - kpoint_density (optional): default 20.0
+    - kpoint_multiplier (optional): K-point multiplier vs optimization, default 1.5
+    - precision (optional): "Normal"/"High"/"Accurate", default "High"
     - custom_incar (optional): Dict to override/add INCAR parameters.
       Examples: {"LORBIT": 12, "NEDOS": 3000}, {"EMIN": -20, "EMAX": 10}
 
     Examples:
     submit_dos_calculation(scf_task_id="scf_001", kpoint_multiplier=3.0)
-    submit_dos_calculation(cif_url="https://example.com/structure.cif", custom_incar={"LORBIT": 11, "NEDOS": 3000})
+    submit_dos_calculation(input_url="https://example.com/structure.cif", custom_incar={"LORBIT": 11, "NEDOS": 3000})
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -168,7 +172,7 @@ async def submit_dos_calculation(
 
 @mcp.tool()
 async def submit_band_structure_calculation(
-    cif_url: Optional[str] = None,
+    input_url: Optional[Union[str, List[str]]] = None,
     scf_task_id: Optional[str] = None,
     queue_name: Optional[str] = None,
     kpoint_density: Optional[float] = None,
@@ -190,16 +194,23 @@ async def submit_band_structure_calculation(
     using pymatgen's HighSymmKpath.
 
     Parameters:
-    - cif_url (optional): URL of structure file
-    - scf_task_id (optional): Completed SCF task ID (recommended — avoids redundant SCF step)
-    - kpoint_density (optional): K-point density for the SCF step, default 30.0
+    - input_url (optional): Unified external input source. Supported forms:
+      1. Single URL string, such as a .cif file or a zip/tar.gz bundle.
+      2. URL array, such as [".../POSCAR", ".../POTCAR", ".../CHGCAR"].
+      3. URL array with only structure inputs, such as [".../structure.cif", ".../POTCAR"],
+         in which case the system automatically runs SCF seed -> Band.
+    - scf_task_id (optional): Completed SCF task ID (recommended when available).
+      This directly reuses the upstream CHGCAR and runs standard NSCF band structure.
+    - kpoint_density (optional): K-point density for the internal SCF seed step, default 20.0
     - line_density (optional): Number of k-points per segment along high-symmetry path, default 20
-    - precision (optional): "Normal"/"High"/"Accurate", default "Accurate"
+    - precision (optional): "Normal"/"High"/"Accurate", default "High"
     - custom_incar (optional): Dict to override/add INCAR parameters.
+      Note: when reusing CHGCAR, grid-related settings such as PREC are kept compatible with the source task/input.
 
     Examples:
     submit_band_structure_calculation(scf_task_id="scf_001")
-    submit_band_structure_calculation(cif_url="https://example.com/structure.cif", line_density=30)
+    submit_band_structure_calculation(input_url="https://example.com/structure.cif", line_density=30)
+    submit_band_structure_calculation(input_url=["https://example.com/POSCAR", "https://example.com/POTCAR", "https://example.com/CHGCAR"])
     """
     params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
     params["user_id"] = get_user_id(ctx)
@@ -209,7 +220,7 @@ async def submit_band_structure_calculation(
 
 @mcp.tool()
 async def submit_md_calculation(
-    cif_url: Optional[str] = None,
+    input_url: Optional[str] = None,
     scf_task_id: Optional[str] = None,
     queue_name: Optional[str] = None,
     md_steps: Optional[int] = None,
@@ -234,7 +245,7 @@ async def submit_md_calculation(
     K-points: fixed 1x1x1 Gamma for MD.
 
     Parameters:
-    - cif_url (optional): URL of structure file
+    - input_url (optional): URL of structure file or a single structure input bundle URL (zip/tar.gz)
     - scf_task_id (optional): Completed SCF task ID
     - md_steps (optional): Number of MD steps, default 1000
     - temperature (optional): Target temperature (K). Single float (300.0) or list of floats ([300, 400, 500])
@@ -248,8 +259,8 @@ async def submit_md_calculation(
     - Multiple temperatures: {"tasks": [{"temperature": 300, "task_id": "..."}, ...], "message": "..."}
 
     Examples:
-    submit_md_calculation(cif_url="https://example.com/structure.cif", md_steps=2000, temperature=350.0)
-    submit_md_calculation(cif_url="https://example.com/structure.cif", temperature=[300.0, 400.0, 500.0], md_steps=1500)
+    submit_md_calculation(input_url="https://example.com/structure.cif", md_steps=2000, temperature=350.0)
+    submit_md_calculation(input_url="https://example.com/structure.cif", temperature=[300.0, 400.0, 500.0], md_steps=1500)
     """
     user_id = get_user_id(ctx)
 
@@ -440,7 +451,12 @@ async def analyze_dos_results(
     Note: vasprun.xml can itself be large (tens to hundreds of MB for dense k-point grids);
           only include it when file size is acceptable.
 
-    Returns analysis summary (band_gap, fermi_energy, is_metal) and HTML report URL.
+    In distributed mode, `task_id` analysis may be dispatched back to the original HPC queue.
+    In that case the response includes `analysis_task_id` and `status`, and you should poll
+    `get_task_status(analysis_task_id)` until it completes.
+
+    Returns analysis summary (band_gap, fermi_energy, is_metal) and HTML report URL
+    when results are already available.
 
     Examples:
     analyze_dos_results(task_id="abc123")
@@ -475,8 +491,12 @@ async def analyze_band_structure_results(
     - EIGENVAL  (raw eigenvalues, used as fallback if vasprun.xml parsing fails)
     Do NOT include CHGCAR/WAVECAR — they are large and not needed for analysis.
 
+    In distributed mode, `task_id` analysis may be dispatched back to the original HPC queue.
+    In that case the response includes `analysis_task_id` and `status`, and you should poll
+    `get_task_status(analysis_task_id)` until it completes.
+
     Returns analysis summary (band_gap, is_direct, vbm, cbm, fermi_energy) and HTML report URL
-    with band structure plot.
+    with band structure plot when results are already available.
 
     Examples:
     analyze_band_structure_results(task_id="abc123")
@@ -508,6 +528,9 @@ async def analyze_md_results(
     Optional: OUTCAR, vasprun.xml, INCAR.
 
     For multi-temperature analysis across multiple tasks, use analyze_md_multi_results instead.
+    In distributed mode, `task_id` analysis may be dispatched back to the original HPC queue.
+    In that case the response includes `analysis_task_id` and `status`, and you should poll
+    `get_task_status(analysis_task_id)` until it completes.
 
     Examples:
     analyze_md_results(task_id="abc123")
@@ -540,7 +563,7 @@ async def analyze_md_multi_results(
     - task_ids (required): List of completed MD task IDs (at least 1, typically 3+)
 
     Workflow:
-    1. Submit individual MD tasks: submit_md_calculation(cif_url="https://example.com/structure.cif", temperature=[300, 400, 500])
+    1. Submit individual MD tasks: submit_md_calculation(input_url="https://example.com/structure.cif", temperature=[300, 400, 500])
     2. Wait for all tasks to complete: get_task_status(task_id) for each
     3. Run aggregation: analyze_md_multi_results(task_ids=["id1", "id2", "id3"])
 
@@ -572,8 +595,8 @@ async def submit_neb_calculation(
     NEB finds the minimum energy path (MEP) and activation barrier between two known
     endpoint structures. Each intermediate image is relaxed simultaneously under NEB forces.
 
-    Default NEB INCAR: ICHAIN=0, LCLIMB=.TRUE. (climbing image), IBRION=3, NSW=500,
-    POTIM=0.5, EDIFF=1E-4, EDIFFG=-0.05, ISIF=2, ISYM=0, ENCUT=520.
+    Default NEB INCAR: ICHAIN=0, LCLIMB=.TRUE. (climbing image), IBRION=3, NSW=300,
+    POTIM=0.5, EDIFF=1E-4, EDIFFG=-0.05, ISIF=2, ISYM=0, ENCUT=450.
     Intermediate images are generated by linear interpolation (pymatgen).
 
     Parameters:
@@ -582,7 +605,7 @@ async def submit_neb_calculation(
       Tip: use optimized task IDs for best results — ensures well-relaxed endpoints
     - n_images (optional): number of intermediate images excluding endpoints, default 5 (range 2-20)
       More images = smoother MEP but higher cost. 5-8 is typical.
-    - kpoint_density (optional): K-point density, default 30.0
+    - kpoint_density (optional): K-point density, default 15.0
     - custom_incar (optional): override INCAR parameters, e.g. {"SPRING": -10, "EDIFFG": -0.03}
 
     Returns:
@@ -617,12 +640,12 @@ async def submit_phonon_calculation(
     - Compute zero-point energy contributions
 
     Default INCAR: IBRION=6 (finite differences + symmetry), NFREE=2, POTIM=0.015 (displacement),
-    EDIFF=1E-8 (very tight), LREAL=.FALSE., ADDGRID=.TRUE., ISMEAR=0, SIGMA=0.01.
+    EDIFF=1E-6, ENCUT=450, PREC=Normal, LREAL=Auto, ISMEAR=0, SIGMA=0.05.
 
     Parameters:
     - cif_url (optional): URL of structure file
     - scf_task_id (optional): Completed SCF/optimization task ID (reuses POSCAR+POTCAR)
-    - kpoint_density (optional): K-point density, default 30.0
+    - kpoint_density (optional): K-point density, default 15.0
     - displacement (optional): finite displacement step in Å, default 0.015
       Smaller = more accurate but more noise; 0.01-0.02 is typical
     - custom_incar (optional): override INCAR, e.g. {"SIGMA": 0.05} for metals
@@ -811,7 +834,9 @@ async def analyze_vasp_output(
         model: Inner agent model (default: qwen3.5-plus).
                Claude models still work when ANTHROPIC_API_KEY is configured.
 
-    Returns answer (with JSON summary), step count, and plot URLs.
+    In distributed mode this request is executed as an HPC-side analysis task. The response may
+    therefore contain `analysis_task_id` and `status` first; poll `get_task_status()` on that
+    task until it finishes, then read the final `answer`, `html_report_url`, and plot URLs.
     """
     user_id = get_user_id(ctx)
     payload: Dict[str, Any] = {
