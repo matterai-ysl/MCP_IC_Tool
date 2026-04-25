@@ -146,25 +146,6 @@ python -m pytest tests -q
 
 如果出现与结构解析相关的失败，先确认 `pymatgen` 是否已经安装。
 
-## Safety
-
-以下内容不要提交到 GitHub：
-
-- `.env`
-- `.venv/`
-- `env/`
-- `venv/`
-- `tasks.db`
-- `public_artifacts/`
-- 任何真实密钥、令牌、证书或数据库连接信息
-- 任何超算、集群、VPS 的登录方式、跳板方式或运维凭据
-
-可以提交：
-
-- `.env.example`，但只能保留示例值
-- 代码、测试、公开文档
-- 不包含敏感信息的启动说明
-
 ## Known Gap
 
 仓库当前存在一个“文档与环境不完全一致”的现实情况：
