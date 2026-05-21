@@ -7,9 +7,10 @@ import json
 import shlex
 import tarfile
 import zipfile
+import re
 from typing import Dict, Any, Optional, List
 import requests
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import time
 from html import escape as html_escape
@@ -23,10 +24,10 @@ from .settings import settings
 # 配置日志
 logger = logging.getLogger(__name__)
 
-from .analyzers.md import generate_md_analysis_report
-
 class VaspWorker:
     """VASP计算工作器"""
+    _required_output_wait_timeout_seconds = 10.0
+    _required_output_wait_poll_seconds = 0.5
     
     def __init__(self, user_id: str, base_work_dir: Optional[str] = None):
         from .Config import DOWNLOAD_URL
@@ -53,6 +54,83 @@ class VaspWorker:
             if marker in result_log:
                 return message
         return None
+
+    @staticmethod
+    def _has_nonempty_file(path: Path) -> bool:
+        return path.exists() and path.is_file() and path.stat().st_size > 0
+
+    @classmethod
+    def _missing_required_outputs(cls, work_dir: Path, filenames: List[str]) -> List[str]:
+        missing: List[str] = []
+        for filename in filenames:
+            if not cls._has_nonempty_file(work_dir / filename):
+                missing.append(filename)
+        return missing
+
+    @staticmethod
+    def _build_missing_output_error(task_type: str, missing_outputs: List[str]) -> str:
+        if task_type == "scf_calculation" and "CHGCAR" in missing_outputs:
+            return "SCF任务未生成有效的 CHGCAR，当前结果不能作为后续 DOS / 能带计算的上游输入"
+        joined = ", ".join(missing_outputs)
+        return f"{task_type} 未生成有效的关键输出文件: {joined}"
+
+    async def _wait_for_nonempty_outputs(self, work_dir: Path, filenames: List[str]) -> List[str]:
+        missing_outputs = self._missing_required_outputs(work_dir, filenames)
+        if not missing_outputs:
+            return []
+
+        timeout_seconds = max(float(getattr(self, "_required_output_wait_timeout_seconds", 0.0)), 0.0)
+        poll_seconds = max(float(getattr(self, "_required_output_wait_poll_seconds", 0.1)), 0.05)
+        if timeout_seconds <= 0:
+            return missing_outputs
+
+        deadline = time.monotonic() + timeout_seconds
+        while missing_outputs and time.monotonic() < deadline:
+            await asyncio.sleep(poll_seconds)
+            missing_outputs = self._missing_required_outputs(work_dir, filenames)
+        return missing_outputs
+
+    @staticmethod
+    def _looks_like_cif_file(path: Path) -> bool:
+        try:
+            snippet = path.read_text(encoding="utf-8", errors="ignore")[:4096]
+        except OSError:
+            return False
+        lowered = snippet.lower()
+        return (
+            "data_" in lowered
+            and (
+                "_cell_length_" in lowered
+                or "_atom_site_" in lowered
+                or "_symmetry_space_group_name" in lowered
+            )
+        )
+
+    @staticmethod
+    def _extract_kpoint_mesh(path: Path) -> Optional[tuple[int, int, int]]:
+        if not path.exists():
+            return None
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return None
+        if len(lines) < 4:
+            return None
+        try:
+            mesh = tuple(int(value) for value in lines[3].split()[:3])
+        except ValueError:
+            return None
+        if len(mesh) != 3:
+            return None
+        return mesh
+
+    @classmethod
+    def _should_use_tetrahedron_for_mesh(cls, mesh: Optional[tuple[int, int, int]]) -> bool:
+        if mesh is None:
+            return False
+        if any(value < 2 for value in mesh):
+            return False
+        return mesh[0] * mesh[1] * mesh[2] >= 8
 
     @staticmethod
     def _has_valid_structure_optimization_output(
@@ -83,16 +161,95 @@ class VaspWorker:
         )
         return (converged or tail_matched) and has_energy_signal and has_optimized_structure
 
-    def _resolve_source_work_directory(self, params: Dict[str, Any]) -> Path:
+    def _resolve_source_work_directory(
+        self,
+        params: Dict[str, Any],
+        *,
+        materialize_root: Optional[Path] = None,
+    ) -> Path:
         source_task_id = str(params.get("source_task_id") or "").strip()
         explicit_work_dir = str(params.get("source_work_directory") or "").strip()
+        upstream_artifacts = (
+            params.get("source_upstream_artifact_manifest")
+            or params.get("upstream_artifact_manifest")
+            or []
+        )
         if source_task_id:
-            return self._resolve_task_work_directory(
-                source_task_id,
-                explicit_work_dir=explicit_work_dir,
-                task_label="源任务",
-            )
+            try:
+                return self._resolve_task_work_directory(
+                    source_task_id,
+                    explicit_work_dir=explicit_work_dir,
+                    task_label="源任务",
+                )
+            except FileNotFoundError:
+                if upstream_artifacts and materialize_root is not None:
+                    return self._materialize_source_artifact_manifest(
+                        upstream_artifacts,
+                        materialize_root,
+                        source_task_id=source_task_id,
+                    )
+                raise
         raise FileNotFoundError("未提供 source_task_id 或 source_work_directory")
+
+    @staticmethod
+    def _safe_artifact_relative_path(filename: Any) -> Optional[Path]:
+        text = str(filename or "").replace("\\", "/").strip()
+        if not text:
+            return None
+        pure = PurePosixPath(text)
+        parts = [part for part in pure.parts if part not in {"", ".", "/"}]
+        if not parts or any(part == ".." for part in parts):
+            return None
+        return Path(*parts)
+
+    def _materialize_source_artifact_manifest(
+        self,
+        artifacts: List[Dict[str, Any]],
+        destination_dir: Path,
+        *,
+        source_task_id: str,
+    ) -> Path:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        failures: List[str] = []
+
+        for index, artifact in enumerate(artifacts):
+            filename = (
+                artifact.get("filename")
+                or os.path.basename(str(artifact.get("object_key") or artifact.get("storage_key") or ""))
+                or artifact.get("artifact_type")
+                or f"artifact-{index}"
+            )
+            relative_path = self._safe_artifact_relative_path(filename)
+            if relative_path is None:
+                failures.append(f"{filename}: 非法文件名")
+                continue
+
+            destination = destination_dir / relative_path
+            try:
+                self.input_resolver.materialize_artifact(artifact, destination)
+                copied += 1
+            except Exception as exc:
+                failures.append(f"{filename}: {exc}")
+
+        if copied == 0:
+            detail = "; ".join(failures[:3])
+            if detail:
+                raise FileNotFoundError(
+                    f"源任务 {source_task_id} 的工作目录不存在，且产物清单无法物化: {detail}"
+                )
+            raise FileNotFoundError(f"源任务 {source_task_id} 的工作目录不存在，且产物清单为空")
+
+        if failures:
+            logger.warning(
+                "源任务 %s 的部分产物物化失败（已复制 %d 个，失败 %d 个）: %s",
+                source_task_id,
+                copied,
+                len(failures),
+                "; ".join(failures[:3]),
+            )
+        logger.info("源任务 %s 已从产物清单物化到 %s", source_task_id, destination_dir)
+        return destination_dir
 
     def _resolve_task_work_directory(
         self,
@@ -171,7 +328,10 @@ class VaspWorker:
         work_dir.mkdir(parents=True, exist_ok=True)
         output_dir = work_dir / "dos_analysis"
         output_dir.mkdir(parents=True, exist_ok=True)
-        source_work_dir = self._resolve_source_work_directory(params)
+        source_work_dir = self._resolve_source_work_directory(
+            params,
+            materialize_root=work_dir / "_source",
+        )
         started_at = time.perf_counter()
 
         if progress_callback:
@@ -207,7 +367,10 @@ class VaspWorker:
         work_dir.mkdir(parents=True, exist_ok=True)
         output_dir = work_dir / "BS_output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        source_work_dir = self._resolve_source_work_directory(params)
+        source_work_dir = self._resolve_source_work_directory(
+            params,
+            materialize_root=work_dir / "_source",
+        )
         started_at = time.perf_counter()
 
         if progress_callback:
@@ -247,7 +410,10 @@ class VaspWorker:
         work_dir.mkdir(parents=True, exist_ok=True)
         output_dir = work_dir / "MD_output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        source_work_dir = self._resolve_source_work_directory(params)
+        source_work_dir = self._resolve_source_work_directory(
+            params,
+            materialize_root=work_dir / "_source",
+        )
         started_at = time.perf_counter()
 
         if progress_callback:
@@ -282,7 +448,10 @@ class VaspWorker:
         work_dir.mkdir(parents=True, exist_ok=True)
         output_dir = work_dir / "agent_analysis"
         output_dir.mkdir(parents=True, exist_ok=True)
-        source_work_dir = self._resolve_source_work_directory(params)
+        source_work_dir = self._resolve_source_work_directory(
+            params,
+            materialize_root=work_dir / "_source",
+        )
         started_at = time.perf_counter()
         question = str(params.get("question") or "").strip()
         model_name = str(params.get("model") or "qwen3.5-plus")
@@ -370,27 +539,29 @@ class VaspWorker:
             if progress_callback:
                 await progress_callback(5, "开始处理输入参数...")
             
-            # 1. 获取CIF文件
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            
-            # 2. 转换为POSCAR
+            # 1. 获取结构文件并物化为 POSCAR
             if progress_callback:
-                await progress_callback(10, "转换CIF为POSCAR...")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, work_dir, params)
+                await progress_callback(10, "准备结构文件...")
+            source_url = params.get("cif_url") or params.get("input_url")
+            if not source_url:
+                raise Exception("无法获取结构文件")
+            poscar_path = await self._materialize_url_structure_source_to_poscar(
+                work_dir,
+                str(source_url),
+                params,
+            )
             
-            # 3. 生成VASP输入文件
+            # 2. 生成VASP输入文件
             if progress_callback:
                 await progress_callback(20, "生成VASP输入文件...")
             await self._generate_vasp_inputs(work_dir, params)
             
-            # 4. 运行VASP计算
+            # 3. 运行VASP计算
             if progress_callback:
                 await progress_callback(30, "开始VASP计算...")
             result = await self._run_vasp_calculation(work_dir, progress_callback)
             
-            # 5. 分析结果
+            # 4. 分析结果
             if progress_callback:
                 await progress_callback(90, "分析计算结果...")
             final_result = await self._analyze_results(task_id, work_dir, result)
@@ -556,8 +727,8 @@ class VaspWorker:
                     await progress_callback(22, "先执行内部SCF以生成CHGCAR...")
                 await self._prepare_scf_then_band_structure_files(work_dir, params)
                 seed_result = await self._run_vasp_calculation(work_dir, progress_callback)
-                chgcar_path = work_dir / "CHGCAR"
-                if seed_result.get("success") is False or not chgcar_path.exists() or chgcar_path.stat().st_size == 0:
+                missing_outputs = await self._wait_for_nonempty_outputs(work_dir, ["CHGCAR"])
+                if seed_result.get("success") is False or missing_outputs:
                     raise Exception("内部SCF预计算失败，未生成有效的 CHGCAR")
                 params["_band_seed_incar_path"] = str(work_dir / "INCAR")
                 bs_files["_band_input_mode"] = "seed_scf_completed"
@@ -648,6 +819,8 @@ class VaspWorker:
 
         # 5. 生成MD分析HTML报告
         try:
+            from .analyzers.md import generate_md_analysis_report
+
             if progress_callback:
                 await progress_callback(95, "生成分子动力学分析报告...")
             html_path = generate_md_analysis_report(str(work_dir), task_id=task_id, output_dir=str(work_dir / "MD_output"))
@@ -684,6 +857,39 @@ class VaspWorker:
             return str(cif_path)
         
         return None
+
+    async def _materialize_url_structure_source_to_poscar(
+        self,
+        work_dir: Path,
+        source_url: str,
+        params: Dict[str, Any],
+        *,
+        dest_name: str = "POSCAR",
+    ) -> str:
+        download_dir = work_dir / "_input_source"
+        downloaded_path = await self._download_input_url(download_dir, source_url, 1)
+        return await self._materialize_structure_source_to_poscar(
+            downloaded_path,
+            work_dir,
+            params,
+            dest_name=dest_name,
+        )
+
+    def _copy_required_file(
+        self,
+        source_path: Path,
+        destination_path: Path,
+        *,
+        allow_empty: bool = False,
+        missing_error: Optional[str] = None,
+        empty_error: Optional[str] = None,
+    ) -> str:
+        if not source_path.exists():
+            raise Exception(missing_error or f"缺少文件: {source_path.name}")
+        if not allow_empty and source_path.stat().st_size == 0:
+            raise Exception(empty_error or f"文件为空: {source_path.name}")
+        shutil.copy(str(source_path), str(destination_path))
+        return str(destination_path)
 
     @staticmethod
     def _safe_extract_zip(archive_path: Path, extract_dir: Path) -> None:
@@ -755,14 +961,21 @@ class VaspWorker:
         source_path: Path,
         work_dir: Path,
         params: Dict[str, Any],
+        *,
+        dest_name: str = "POSCAR",
     ) -> str:
         suffix = source_path.suffix.lower()
-        if suffix == ".cif":
+        if suffix == ".cif" or self._looks_like_cif_file(source_path):
             cif_target = work_dir / "structure.cif"
             shutil.copy(str(source_path), str(cif_target))
-            return await self._convert_cif_to_poscar(str(cif_target), work_dir, params)
+            generated_path = await self._convert_cif_to_poscar(str(cif_target), work_dir, params)
+            if dest_name == "POSCAR":
+                return generated_path
+            destination = work_dir / dest_name
+            shutil.copy(str(generated_path), str(destination))
+            return str(destination)
 
-        poscar_path = work_dir / "POSCAR"
+        poscar_path = work_dir / dest_name
         shutil.copy(str(source_path), str(poscar_path))
         return str(poscar_path)
 
@@ -802,9 +1015,21 @@ class VaspWorker:
 
         if poscar_source and potcar_source and chgcar_source:
             copied_files: Dict[str, str] = {
-                "POSCAR": str(shutil.copy(str(poscar_source), str(work_dir / "POSCAR"))),
-                "POTCAR": str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR"))),
-                "CHGCAR": str(shutil.copy(str(chgcar_source), str(work_dir / "CHGCAR"))),
+                "POSCAR": self._copy_required_file(
+                    poscar_source,
+                    work_dir / "POSCAR",
+                    empty_error="输入包中的 POSCAR 为空",
+                ),
+                "POTCAR": self._copy_required_file(
+                    potcar_source,
+                    work_dir / "POTCAR",
+                    empty_error="输入包中的 POTCAR 为空",
+                ),
+                "CHGCAR": self._copy_required_file(
+                    chgcar_source,
+                    work_dir / "CHGCAR",
+                    empty_error="输入包中的 CHGCAR 为空，未生成有效的 CHGCAR",
+                ),
                 "_band_input_mode": "bundle_with_chgcar",
             }
             if chg_source:
@@ -868,9 +1093,21 @@ class VaspWorker:
 
         if poscar_source and potcar_source and chgcar_source:
             copied_files: Dict[str, str] = {
-                "POSCAR": str(shutil.copy(str(poscar_source), str(work_dir / "POSCAR"))),
-                "POTCAR": str(shutil.copy(str(potcar_source), str(work_dir / "POTCAR"))),
-                "CHGCAR": str(shutil.copy(str(chgcar_source), str(work_dir / "CHGCAR"))),
+                "POSCAR": self._copy_required_file(
+                    poscar_source,
+                    work_dir / "POSCAR",
+                    empty_error="输入包中的 POSCAR 为空",
+                ),
+                "POTCAR": self._copy_required_file(
+                    potcar_source,
+                    work_dir / "POTCAR",
+                    empty_error="输入包中的 POTCAR 为空",
+                ),
+                "CHGCAR": self._copy_required_file(
+                    chgcar_source,
+                    work_dir / "CHGCAR",
+                    empty_error="输入包中的 CHGCAR 为空，未生成有效的 CHGCAR",
+                ),
                 "_dos_input_mode": "bundle_with_chgcar",
             }
             if chg_source:
@@ -961,8 +1198,8 @@ class VaspWorker:
             opt_work_dir = self._resolve_task_work_directory(optimized_task_id, task_label="优化任务")
             contcar_path = opt_work_dir / "CONTCAR"
             
-            if not contcar_path.exists():
-                raise Exception(f"优化任务 {optimized_task_id} 的CONTCAR文件不存在")
+            if not self._has_nonempty_file(contcar_path):
+                raise Exception(f"优化任务 {optimized_task_id} 中未找到有效的 CONTCAR")
             
             # 复制CONTCAR作为POSCAR
             poscar_path = work_dir / "POSCAR"
@@ -971,15 +1208,14 @@ class VaspWorker:
             return str(poscar_path)
             
         elif params.get('cif_url'):
-            # 从CIF URL下载
+            # 从结构 URL 下载；如果链接实际指向 POSCAR/CONTCAR，也按结构文件处理。
             if progress_callback:
-                await progress_callback(15, f"从URL下载CIF: {params['cif_url']}")
-            
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取CIF文件")
-            
-            return await self._convert_cif_to_poscar(cif_path, work_dir, params)
+                await progress_callback(15, f"从URL下载结构文件: {params['cif_url']}")
+            return await self._materialize_url_structure_source_to_poscar(
+                work_dir,
+                str(params["cif_url"]),
+                params,
+            )
         
         else:
             raise Exception("必须提供 cif_url 或 optimized_task_id 中的一个")
@@ -1015,13 +1251,24 @@ class VaspWorker:
                 dst_path = work_dir / filename
                 
                 if src_path.exists():
-                    shutil.copy(str(src_path), str(dst_path))
-                    copied_files[filename] = str(dst_path)
+                    copied_files[filename] = self._copy_required_file(
+                        src_path,
+                        dst_path,
+                        allow_empty=filename in {"CHG", "WAVECAR"},
+                        missing_error=f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}",
+                        empty_error=(
+                            f"SCF任务 {scf_task_id} 未生成有效的 CHGCAR"
+                            if filename == "CHGCAR"
+                            else f"SCF任务 {scf_task_id} 的 {filename} 为空"
+                        ),
+                    )
                     logger.info("复制文件: %s", filename)
                 else:
                     logger.warning("文件不存在: %s", src_path)
                     if filename in ["POSCAR", "POTCAR"]:  # 关键文件
                         raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
+                    if filename == "CHGCAR":
+                        raise Exception(f"SCF任务 {scf_task_id} 未生成有效的 CHGCAR")
             
             return copied_files
             
@@ -1071,12 +1318,23 @@ class VaspWorker:
                 dst_path = work_dir / filename
 
                 if src_path.exists():
-                    shutil.copy(str(src_path), str(dst_path))
-                    copied_files[filename] = str(dst_path)
+                    copied_files[filename] = self._copy_required_file(
+                        src_path,
+                        dst_path,
+                        allow_empty=filename in {"CHG", "WAVECAR"},
+                        missing_error=f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}",
+                        empty_error=(
+                            f"SCF任务 {scf_task_id} 未生成有效的 CHGCAR"
+                            if filename == "CHGCAR"
+                            else f"SCF任务 {scf_task_id} 的 {filename} 为空"
+                        ),
+                    )
                     logger.info("复制文件: %s", filename)
                 else:
                     logger.warning("文件不存在: %s", src_path)
                     if filename in ["POSCAR", "POTCAR", "CHGCAR"]:
+                        if filename == "CHGCAR":
+                            raise Exception(f"SCF任务 {scf_task_id} 未生成有效的 CHGCAR")
                         raise Exception(f"关键文件 {filename} 不存在于SCF任务 {scf_task_id}")
             scf_incar_path = scf_work_dir / "INCAR"
             if scf_incar_path.exists():
@@ -1484,7 +1742,7 @@ LANGEVIN_GAMMA = 10.0
                         new_nx = max(1, int(nx * multiplier))
                         new_ny = max(1, int(ny * multiplier))
                         new_nz = max(1, int(nz * multiplier))
-                        
+
                         lines[3] = f"{new_nx} {new_ny} {new_nz}\n"
                         
                         with open(kpoints_path, 'w') as f:
@@ -1499,6 +1757,9 @@ LANGEVIN_GAMMA = 10.0
         from .base import generate_incar
         
         precision = params.get('precision', 'High')
+        kpoint_mesh = self._extract_kpoint_mesh(work_dir / "KPOINTS")
+        use_tetrahedron = self._should_use_tetrahedron_for_mesh(kpoint_mesh)
+        params["_dos_smearing_mode"] = "tetrahedron" if use_tetrahedron else "gaussian"
 
         # 先生成基础INCAR
         generate_incar(str(work_dir))
@@ -1527,9 +1788,15 @@ LANGEVIN_GAMMA = 10.0
             elif stripped.startswith("LCHARG"):
                 new_lines.append("LCHARG = .TRUE.\n")  # 保存电荷密度
             elif stripped.startswith("ISMEAR"):
-                new_lines.append("ISMEAR = -5\n")  # DOS计算推荐四面体方法
+                if use_tetrahedron:
+                    new_lines.append("ISMEAR = -5\n")
+                else:
+                    new_lines.append("ISMEAR = 0\n")
             elif stripped.startswith("SIGMA"):
-                new_lines.append("# SIGMA = 0.05\n")  # 四面体方法不需要
+                if use_tetrahedron:
+                    new_lines.append("# SIGMA = 0.05\n")
+                else:
+                    new_lines.append("SIGMA = 0.05\n")
             else:
                 new_lines.append(line)
         
@@ -1659,12 +1926,12 @@ LANGEVIN_GAMMA = 10.0
         
         # DOS计算不需要重新生成POSCAR和POTCAR，直接使用从SCF复制的文件
         
-        # 1. 修改INCAR文件用于DOS计算
-        await self._modify_incar_for_dos(work_dir, params)
-        
-        # 2. 生成DOS专用KPOINTS（基于优化计算倍增）
+        # 1. 生成DOS专用KPOINTS（基于优化计算倍增）
         await self._generate_dos_kpoints(work_dir, params)
         
+        # 2. 修改INCAR文件用于DOS计算
+        await self._modify_incar_for_dos(work_dir, params)
+
         # 3. 应用自定义INCAR参数
         await self._apply_custom_incar(work_dir, params)
     
@@ -1677,6 +1944,9 @@ LANGEVIN_GAMMA = 10.0
         )
         seed_incar_path = params.get("_dos_seed_incar_path")
         preserve_precision = False
+        kpoint_mesh = self._extract_kpoint_mesh(work_dir / "KPOINTS")
+        use_tetrahedron = self._should_use_tetrahedron_for_mesh(kpoint_mesh)
+        params["_dos_smearing_mode"] = "tetrahedron" if use_tetrahedron else "gaussian"
 
         # 查找源INCAR文件
         scf_task_id = params.get('scf_task_id')
@@ -1731,9 +2001,15 @@ LANGEVIN_GAMMA = 10.0
             elif stripped.startswith("ICHARG"):
                 new_lines.append("ICHARG = 11\n")  # 从CHGCAR读取电荷密度
             elif stripped.startswith("ISMEAR"):
-                new_lines.append("ISMEAR = -5\n")  # 四面体方法
+                if use_tetrahedron:
+                    new_lines.append("ISMEAR = -5\n")
+                else:
+                    new_lines.append("ISMEAR = 0\n")
             elif stripped.startswith("SIGMA"):
-                new_lines.append("# SIGMA = 0.05\n")  # 注释掉，四面体方法不需要
+                if use_tetrahedron:
+                    new_lines.append("# SIGMA = 0.05\n")
+                else:
+                    new_lines.append("SIGMA = 0.05\n")
             elif stripped.startswith("LWAVE"):
                 new_lines.append("LWAVE = .FALSE.\n")  # DOS计算不需要保存波函数
             elif stripped.startswith("LCHARG"):
@@ -1910,7 +2186,7 @@ LANGEVIN_GAMMA = 10.0
 
             structure = Structure.from_file(str(poscar_path))
             kpath = HighSymmKpath(structure)
-            kpts = kpath.kpath
+            kpts = kpath.kpath or {}
 
             # 生成线模式KPOINTS
             kpoints_lines = ["K-Path generated by pymatgen\n"]
@@ -1918,8 +2194,12 @@ LANGEVIN_GAMMA = 10.0
             kpoints_lines.append("Line-mode\n")
             kpoints_lines.append("Reciprocal\n")
 
-            path_segments = kpts['path']
-            kpts_coords = kpts['kpoints']
+            path_segments = kpts.get('path') or []
+            kpts_coords = kpts.get('kpoints') or {}
+            path_segments, kpts_coords = self._normalize_band_kpath(
+                path_segments,
+                kpts_coords,
+            )
 
             for segment in path_segments:
                 for i in range(len(segment) - 1):
@@ -1955,6 +2235,49 @@ LANGEVIN_GAMMA = 10.0
 
         except ImportError:
             raise Exception("需要安装 pymatgen 来生成高对称k路径: pip install pymatgen")
+
+    @staticmethod
+    def _normalize_band_kpath(path_segments: Any, kpts_coords: Any) -> tuple[List[List[str]], Dict[str, List[float]]]:
+        if not isinstance(kpts_coords, dict):
+            kpts_coords = {}
+
+        normalized_coords: Dict[str, List[float]] = {}
+        for label, coord in kpts_coords.items():
+            try:
+                values = list(coord)
+            except TypeError:
+                continue
+            if len(values) < 3:
+                continue
+            try:
+                normalized_coords[str(label)] = [float(values[0]), float(values[1]), float(values[2])]
+            except (TypeError, ValueError):
+                continue
+
+        normalized_segments: List[List[str]] = []
+        if isinstance(path_segments, list):
+            for segment in path_segments:
+                if not isinstance(segment, (list, tuple)):
+                    continue
+                labels = [str(label) for label in segment if str(label) in normalized_coords]
+                if len(labels) >= 2:
+                    normalized_segments.append(labels)
+
+        if normalized_segments and normalized_coords:
+            return normalized_segments, normalized_coords
+
+        logger.warning(
+            "pymatgen 未能为该结构生成可用高对称 k 路径，改用保守 G-X/G-Y/G-Z 线模式路径"
+        )
+        return (
+            [["G", "X"], ["G", "Y"], ["G", "Z"]],
+            {
+                "G": [0.0, 0.0, 0.0],
+                "X": [0.5, 0.0, 0.0],
+                "Y": [0.0, 0.5, 0.0],
+                "Z": [0.0, 0.0, 0.5],
+            },
+        )
 
     async def _prepare_scf_then_band_structure_files(self, work_dir: Path, params: Dict[str, Any]):
         """为 band 任务的内部 seed SCF 准备输入文件。"""
@@ -2001,7 +2324,39 @@ LANGEVIN_GAMMA = 10.0
 
         logger.info("Band 内部 seed SCF 输入文件已准备完成")
 
-    async def _run_vasp_calculation(self, work_dir: Path, progress_callback=None) -> Dict[str, Any]:
+    @staticmethod
+    def _has_expected_vasp_output(work_dir: Path, output_check: str = "standard") -> bool:
+        if output_check == "neb":
+            return any(path.is_file() and path.stat().st_size > 0 for path in work_dir.glob("[0-9][0-9]/OUTCAR"))
+        return (work_dir / "OUTCAR").exists()
+
+    @classmethod
+    def _has_tolerable_gpu_deallocate_failure(cls, work_dir: Path, output_check: str = "standard") -> bool:
+        """VASP 5 GPU builds can finish SCF outputs, then fail during final deallocation."""
+        if output_check != "standard":
+            return False
+
+        result_log_path = work_dir / "result.log"
+        try:
+            result_log = result_log_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+
+        if "forrtl: severe (173): A pointer passed to DEALLOCATE" not in result_log:
+            return False
+        if " F= " not in result_log:
+            return False
+
+        required_outputs = ["OUTCAR", "CHGCAR", "AECCAR0", "AECCAR2"]
+        return not cls._missing_required_outputs(work_dir, required_outputs)
+
+    async def _run_vasp_calculation(
+        self,
+        work_dir: Path,
+        progress_callback=None,
+        *,
+        output_check: str = "standard",
+    ) -> Dict[str, Any]:
         """运行VASP计算"""
         import re
 
@@ -2036,6 +2391,8 @@ LANGEVIN_GAMMA = 10.0
         total_tasks = int(os.getenv("SLURM_NTASKS", str(settings.slurm_ntasks)))  # 总任务数
         tasks_per_node = int(os.getenv("SLURM_TASKS_PER_NODE", str(settings.slurm_tasks_per_node)))  # 每节点任务数
         partition = os.getenv("SLURM_PARTITION", settings.slurm_partition)
+        slurm_gpus = (os.getenv("SLURM_GPUS", str(settings.slurm_gpus or "")) or "").strip()
+        gpu_directive = f"#SBATCH --gpus={slurm_gpus}" if slurm_gpus else ""
         time_limit = os.getenv("SLURM_TIME_LIMIT", settings.slurm_time_limit)
         module_load = (os.getenv("SLURM_MODULE_LOAD", settings.slurm_module_load or "") or "").strip() or None
         oneapi_env_script = (os.getenv("ONEAPI_ENV_SCRIPT", settings.oneapi_env_script or "") or "").strip() or None
@@ -2054,6 +2411,7 @@ LANGEVIN_GAMMA = 10.0
 #SBATCH -n {total_tasks}
 #SBATCH --job-name={work_dir.name}
 #SBATCH --partition={partition}
+{gpu_directive}
 #SBATCH --ntasks-per-node={tasks_per_node}
 #SBATCH --cpus-per-task=1
 #SBATCH --time={time_limit}
@@ -2076,6 +2434,11 @@ echo "节点列表: $SLURM_JOB_NODELIST"
 
 echo "=== 开始VASP计算 ==="
 {run_line}
+vasp_exit_code=$?
+if [ "$vasp_exit_code" -ne 0 ]; then
+    echo "VASP计算失败，退出码: $vasp_exit_code"
+    exit "$vasp_exit_code"
+fi
 echo "VASP计算完成"
         """
 
@@ -2141,34 +2504,46 @@ echo "VASP计算完成"
                             job_completed = True
                             logger.info("作业已离开 squeue，sacct 最终状态: %s", final_state or "UNKNOWN")
                             if final_state and final_state != "COMPLETED":
+                                if self._has_tolerable_gpu_deallocate_failure(work_dir, output_check=output_check):
+                                    logger.warning(
+                                        "作业最终状态为 %s，但检测到 VASP GPU deallocate 尾部错误且 SCF 输出完整，继续后处理",
+                                        final_state,
+                                    )
+                                else:
+                                    error_files = list(work_dir.glob("*.err"))
+                                    error_msg = f"作业最终状态为 {final_state}"
+                                    if error_files:
+                                        try:
+                                            with open(error_files[0], 'r') as f:
+                                                error_content = f.read()
+                                            if error_content.strip():
+                                                error_msg += f"\n错误日志:\n{error_content}"
+                                        except Exception:
+                                            pass
+                                    raise Exception(error_msg)
+                    elif status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"]:
+                        job_completed = True
+                        logger.info("作业状态: %s", status)
+
+                        if status != "COMPLETED":
+                            # 检查错误日志
+                            if self._has_tolerable_gpu_deallocate_failure(work_dir, output_check=output_check):
+                                logger.warning(
+                                    "作业以状态 %s 结束，但检测到 VASP GPU deallocate 尾部错误且 SCF 输出完整，继续后处理",
+                                    status,
+                                )
+                            else:
                                 error_files = list(work_dir.glob("*.err"))
-                                error_msg = f"作业最终状态为 {final_state}"
+                                error_msg = f"作业以状态 {status} 结束"
                                 if error_files:
                                     try:
                                         with open(error_files[0], 'r') as f:
                                             error_content = f.read()
                                         if error_content.strip():
                                             error_msg += f"\n错误日志:\n{error_content}"
-                                    except Exception:
+                                    except:
                                         pass
                                 raise Exception(error_msg)
-                    elif status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"]:
-                        job_completed = True
-                        logger.info("作业状态: %s", status)
-                        
-                        if status != "COMPLETED":
-                            # 检查错误日志
-                            error_files = list(work_dir.glob("*.err"))
-                            error_msg = f"作业以状态 {status} 结束"
-                            if error_files:
-                                try:
-                                    with open(error_files[0], 'r') as f:
-                                        error_content = f.read()
-                                    if error_content.strip():
-                                        error_msg += f"\n错误日志:\n{error_content}"
-                                except:
-                                    pass
-                            raise Exception(error_msg)
                     else:
                         # 作业仍在运行
                         status_msg = {
@@ -2189,18 +2564,26 @@ echo "VASP计算完成"
                         logger.warning("无法查询作业状态，sacct 最终状态: %s", final_state or "UNKNOWN")
                         job_completed = True
                         if final_state and final_state != "COMPLETED":
-                            raise Exception(f"作业最终状态为 {final_state}")
+                            if self._has_tolerable_gpu_deallocate_failure(work_dir, output_check=output_check):
+                                logger.warning(
+                                    "sacct 最终状态为 %s，但检测到 VASP GPU deallocate 尾部错误且 SCF 输出完整，继续后处理",
+                                    final_state,
+                                )
+                            else:
+                                raise Exception(f"作业最终状态为 {final_state}")
                 
                 if not job_completed:
                     await asyncio.sleep(30)  # 每30秒检查一次
                     progress = min(progress + 3, 90)
             
             # 检查输出文件
-            outcar_file = work_dir / "OUTCAR"
-            if not outcar_file.exists():
+            if not self._has_expected_vasp_output(work_dir, output_check=output_check):
                 # 查找输出文件
                 output_files = list(work_dir.glob("*.out"))
-                error_msg = "VASP计算可能失败，未找到OUTCAR文件"
+                if output_check == "neb":
+                    error_msg = "VASP计算可能失败，未找到 NEB 图像 OUTCAR 文件"
+                else:
+                    error_msg = "VASP计算可能失败，未找到OUTCAR文件"
                 if output_files:
                     try:
                         with open(output_files[0], 'r') as f:
@@ -2224,13 +2607,17 @@ echo "VASP计算完成"
             end_time = time.time()
             computation_time = end_time - start_time
             
+            output_files = [str(f) for f in work_dir.glob("*") if f.is_file()]
+            if output_check == "neb":
+                output_files.extend(str(f) for f in work_dir.glob("[0-9][0-9]/*") if f.is_file())
+
             return {
                 'success': True,
                 'computation_time': computation_time,
                 'stdout': result_log,
                 'stderr': '',
                 'slurm_job_id': slurm_job_id,
-                'output_files': [str(f) for f in work_dir.glob("*") if f.is_file()]
+                'output_files': output_files,
             }
             
         except Exception as e:
@@ -2385,6 +2772,82 @@ echo "VASP计算完成"
                 return 'reached required accuracy' in last_content
         except Exception:
             return False
+
+    @staticmethod
+    def _parse_vasp_float(value: str) -> float:
+        return float(value.replace("D", "E").replace("d", "e"))
+
+    @classmethod
+    def _extract_oszicar_electronic_rows(cls, oszicar_path: Path) -> list[dict[str, float]]:
+        """Extract DAV/RMM electronic iterations from OSZICAR."""
+        try:
+            lines = oszicar_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return []
+
+        rows: list[dict[str, float]] = []
+        row_pattern = re.compile(
+            r"^\s*(?:DAV|RMM):\s+(\d+)\s+([-+0-9.EeDd]+)\s+([-+0-9.EeDd]+)\s+([-+0-9.EeDd]+)"
+        )
+        for line in lines:
+            match = row_pattern.match(line)
+            if not match:
+                continue
+            try:
+                rows.append(
+                    {
+                        "step": int(match.group(1)),
+                        "energy": cls._parse_vasp_float(match.group(2)),
+                        "energy_change": cls._parse_vasp_float(match.group(3)),
+                        "eigenvalue_change": cls._parse_vasp_float(match.group(4)),
+                    }
+                )
+            except ValueError:
+                continue
+        return rows
+
+    @staticmethod
+    def _extract_incar_value(work_dir: Path, key: str) -> Optional[str]:
+        incar_path = work_dir / "INCAR"
+        try:
+            lines = incar_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return None
+
+        key_upper = key.upper()
+        for line in lines:
+            line = line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            raw_key, raw_value = line.split("=", 1)
+            if raw_key.strip().upper() == key_upper:
+                return raw_value.strip().split()[0]
+        return None
+
+    @classmethod
+    def _extract_incar_float(cls, work_dir: Path, key: str, default: float) -> float:
+        value = cls._extract_incar_value(work_dir, key)
+        if value is None:
+            return default
+        try:
+            return cls._parse_vasp_float(value)
+        except ValueError:
+            return default
+
+    @classmethod
+    def _infer_scf_convergence_from_oszicar(cls, work_dir: Path) -> Optional[bool]:
+        """Infer SCF electronic convergence when GPU VASP misses the OUTCAR tail marker."""
+        rows = cls._extract_oszicar_electronic_rows(work_dir / "OSZICAR")
+        if not rows:
+            return None
+
+        final_row = rows[-1]
+        ediff = cls._extract_incar_float(work_dir, "EDIFF", 1e-4)
+        final_delta = max(
+            abs(final_row.get("energy_change", 0.0)),
+            abs(final_row.get("eigenvalue_change", 0.0)),
+        )
+        return final_delta < ediff
     
     def _extract_energy(self, outcar_path: Path) -> Optional[float]:
         """从OUTCAR提取最终能量"""
@@ -2466,6 +2929,10 @@ echo "VASP计算完成"
             logger.debug("检查收敛性")
             outcar_path = work_dir / "OUTCAR"
             convergence = self._check_convergence(outcar_path)
+            if not convergence:
+                inferred_convergence = self._infer_scf_convergence_from_oszicar(work_dir)
+                if inferred_convergence is not None:
+                    convergence = inferred_convergence
             logger.debug("收敛性: %s", convergence)
             # 提取总能量
             total_energy = self._extract_energy(outcar_path)
@@ -2479,6 +2946,21 @@ echo "VASP计算完成"
             # 提取电子步数
             electronic_steps = self._extract_electronic_steps(outcar_path)
             logger.debug("电子步数: %s", electronic_steps)
+
+            missing_outputs = self._missing_required_outputs(work_dir, ["CHGCAR"])
+            if missing_outputs:
+                return {
+                    'success': False,
+                    'convergence': convergence,
+                    'total_energy': total_energy,
+                    'fermi_energy': fermi_energy,
+                    'band_gap': band_gap,
+                    'electronic_steps': electronic_steps,
+                    'missing_outputs': missing_outputs,
+                    'error': self._build_missing_output_error("scf_calculation", missing_outputs),
+                    'work_directory': str(work_dir),
+                }
+
             # 运行Bader电荷分析
             logger.info("运行Bader电荷分析")
             self._run_bader_analysis(work_dir)
@@ -2598,8 +3080,12 @@ echo "VASP计算完成"
             for line in lines:
                 if 'RMM:' in line or 'DAV:' in line:
                     electronic_steps += 1
-            
-            return electronic_steps if electronic_steps > 0 else None
+
+            if electronic_steps > 0:
+                return electronic_steps
+
+            oszicar_rows = self._extract_oszicar_electronic_rows(outcar_path.parent / "OSZICAR")
+            return len(oszicar_rows) if oszicar_rows else None
         except Exception:
             return None
     
@@ -2716,7 +3202,9 @@ echo "VASP计算完成"
 
                 vasprun_path = work_dir / "vasprun.xml"
                 if vasprun_path.exists():
-                    vasprun = Vasprun(str(vasprun_path), parse_projected_eigen=True)
+                    # Projected eigen parsing is memory-heavy and can kill the
+                    # worker for large band calculations during final analysis.
+                    vasprun = Vasprun(str(vasprun_path), parse_projected_eigen=False)
                     bs = vasprun.get_band_structure(line_mode=True)
 
                     band_gap = bs.get_band_gap()['energy']
@@ -2942,7 +3430,7 @@ echo "VASP计算完成"
             # 4. 运行 VASP
             if progress_callback:
                 await progress_callback(40, "开始 VASP NEB 计算...")
-            result = await self._run_vasp_calculation(work_dir, progress_callback)
+            result = await self._run_vasp_calculation(work_dir, progress_callback, output_check="neb")
 
             # 5. 分析结果
             if progress_callback:
@@ -2998,10 +3486,12 @@ echo "VASP计算完成"
             else:
                 raise Exception(f"必须提供 {task_id_key} 或 {cif_url_key}")
 
-            cif_path = await self._get_cif_file(tmp_dir, tmp_params, None)
-            if not cif_path:
-                raise Exception(f"无法获取 {dest_name} 的 CIF 文件")
-            poscar_path = await self._convert_cif_to_poscar(cif_path, tmp_dir, tmp_params)
+            poscar_path = await self._materialize_url_structure_source_to_poscar(
+                tmp_dir,
+                str(cif_url_val),
+                tmp_params,
+                dest_name=dest_name,
+            )
             shutil.copy(poscar_path, str(dest))
             shutil.rmtree(str(tmp_dir), ignore_errors=True)
             return str(dest)
@@ -3203,10 +3693,11 @@ LREAL = Auto
         elif params.get('cif_url'):
             if progress_callback:
                 await progress_callback(10, "获取 CIF 结构文件...")
-            cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-            if not cif_path:
-                raise Exception("无法获取 CIF 文件")
-            await self._convert_cif_to_poscar(cif_path, work_dir, params)
+            await self._materialize_url_structure_source_to_poscar(
+                work_dir,
+                str(params["cif_url"]),
+                params,
+            )
             generate_potcar(str(work_dir))
         else:
             raise Exception("必须提供 cif_url 或 scf_task_id 中的一个")
@@ -3347,10 +3838,11 @@ GGA = PE
                     return
             raise Exception(f"任务 {params['from_task_id']} 中未找到有效的 CONTCAR 或 POSCAR")
 
-        cif_path = await self._get_cif_file(work_dir, params, progress_callback)
-        if not cif_path:
-            raise Exception("无法获取 CIF 文件")
-        await self._convert_cif_to_poscar(cif_path, work_dir, params)
+        await self._materialize_url_structure_source_to_poscar(
+            work_dir,
+            str(params["cif_url"]),
+            params,
+        )
 
     async def _generate_custom_kpoints(self, work_dir: Path, params: Dict[str, Any]) -> None:
         """生成 K 点文件（mesh 或 gamma）"""

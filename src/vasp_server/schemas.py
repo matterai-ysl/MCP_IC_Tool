@@ -23,7 +23,6 @@ _INCAR_KEY_BLACKLIST = frozenset({
     "IBRION",     # 由计算类型决定（优化/MD/SCF）
     "NSW",        # 由计算类型决定
     "LCHARG",     # 输出控制由分析流程依赖
-    "LWAVE",      # 同上
 })
 
 def _validate_custom_incar(v: Dict[str, Any] | None) -> Dict[str, Any] | None:

@@ -140,6 +140,13 @@ class FakeExecutionWorker:
             "summary": {"band_gap": 1.23},
         }
 
+    async def run_scf_calculation(self, task_id, params, progress_callback=None):
+        if progress_callback:
+            await progress_callback(15, "running", pid=23456)
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
 
 def _write_runtime_state(tmp_path: Path, worker_id: str, payload: dict) -> Path:
     runtime_dir = tmp_path / ".control-plane-runtime" / worker_id
@@ -174,6 +181,37 @@ def test_pull_worker_claims_runs_uploads_and_completes(tmp_path):
     assert client.completed_tasks == ["task-1"]
     assert client.marked_running == [("task-1", "lease-1")]
     assert client.complete_payloads[0]["artifact_manifest"][0]["filename"] == "result.log"
+
+
+def test_pull_worker_rejects_completed_scf_with_empty_chgcar(tmp_path):
+    from src.vasp_server.hpc_pull_worker import PullWorker
+
+    work_dir = tmp_path / "scf-task"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "OUTCAR").write_text("outcar", encoding="utf-8")
+    (work_dir / "POSCAR").write_text("poscar", encoding="utf-8")
+    (work_dir / "CHGCAR").write_text("", encoding="utf-8")
+
+    client = FakeControlPlaneClient(
+        tasks=[
+            {
+                "task_id": "scf-task",
+                "task_type": "scf_calculation",
+                "lease_token": "lease-1",
+                "params": {"optimized_task_id": "opt-1"},
+            }
+        ]
+    )
+    worker = FakeExecutionWorker(result={"success": True, "work_directory": str(work_dir), "total_energy": -20.0})
+
+    pull_worker = PullWorker(control_plane_client=client, execution_worker=worker)
+    pull_worker.run_once()
+
+    assert client.completed_tasks == []
+    assert client.failed_tasks == ["scf-task"]
+    assert "未生成有效的 CHGCAR" in client.fail_payloads[0]["error_message"]
+    assert client.fail_payloads[0]["failure_context"]["missing_outputs"] == ["CHGCAR"]
+    assert client.fail_payloads[0]["failure_context"]["validation_stage"] == "result_validation"
 
 
 def test_pull_worker_sends_heartbeats_while_job_is_running():
@@ -284,6 +322,49 @@ def test_fail_path_reports_failure_context_with_scheduler_metadata(tmp_path):
     assert failure_context["work_directory"] == str(work_dir)
 
 
+def test_fail_path_reports_guidance_from_hpc_workdir_logs(tmp_path):
+    from src.vasp_server.hpc_pull_worker import PullWorker
+
+    work_dir = tmp_path / "task-edddav"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "OUTCAR").write_text(
+        "\n".join(
+            [
+                "Orbital orthonormalization failed in the inversion of matrix",
+                "scaLAPACK: Routine ZPOTRF ZTRTRI failed! kpoint: 1 spin: 1",
+                "Error EDDDAV: Call to ZHEGV failed.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = FakeControlPlaneClient(
+        tasks=[
+            {
+                "task_id": "task-edddav",
+                "task_type": "structure_optimization",
+                "lease_token": "lease-edddav",
+                "params": {"formula": "NbAlC"},
+            }
+        ]
+    )
+    worker = FakeExecutionWorker(
+        result={
+            "success": False,
+            "error": "结构优化计算失败: VASP计算执行失败: 作业最终状态为 FAILED",
+            "work_directory": str(work_dir),
+        }
+    )
+
+    PullWorker(control_plane_client=client, execution_worker=worker).run_once()
+
+    payload = client.fail_payloads[0]
+    assert payload["failure_code"] == "electronic_divergence"
+    assert payload["failure_context"]["failure_type"] == "electronic_divergence"
+    assert "诊断:" in payload["error_message"]
+    assert "建议给智能体的下一步" in payload["error_message"]
+    assert "先对该结构做一次 SCF" in payload["error_message"]
+
+
 def test_scheduler_failure_message_includes_agent_guidance_for_unstable_scf(tmp_path):
     from src.vasp_server.hpc_pull_worker import PullWorker
 
@@ -331,6 +412,39 @@ def test_scheduler_failure_message_includes_agent_guidance_for_lattice_inconsist
 
     assert "晶格参数" in message
     assert "重新导出" in message or "规范化" in message
+
+
+def test_failure_payload_includes_agent_guidance_for_disordered_structure():
+    from src.vasp_server.hpc_pull_worker import PullWorker
+
+    client = FakeControlPlaneClient(
+        tasks=[
+            {
+                "task_id": "task-disordered",
+                "task_type": "structure_optimization",
+                "lease_token": "lease-disordered",
+                "params": {"cif_url": "https://example.com/disordered.cif"},
+            }
+        ]
+    )
+    worker = FakeExecutionWorker(
+        result={
+            "success": False,
+            "error": (
+                "自定义计算失败: Disordered structure with partial occupancies "
+                "cannot be converted into POSCAR!"
+            ),
+            "work_directory": "/tmp/task-disordered",
+        }
+    )
+
+    PullWorker(control_plane_client=client, execution_worker=worker).run_once()
+
+    payload = client.fail_payloads[0]
+    assert payload["failure_code"] == "disordered_structure"
+    assert payload["failure_context"]["failure_type"] == "disordered_structure"
+    assert "建议给智能体的下一步" in payload["error_message"]
+    assert "有序结构" in payload["error_message"]
 
 
 def test_collect_artifact_manifest_recurses_and_preserves_relative_paths(tmp_path):

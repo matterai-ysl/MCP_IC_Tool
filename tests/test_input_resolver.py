@@ -56,6 +56,19 @@ def test_dos_resolves_charge_and_wavefunction_from_manifest(tmp_path):
     assert (work_dir / "WAVECAR").read_text(encoding="utf-8") == "wavecar"
 
 
+def test_dos_rejects_empty_chgcar_from_manifest(tmp_path):
+    resolver = UpstreamInputResolver()
+    work_dir = tmp_path / "dos-empty-chgcar"
+    artifacts = [
+        {"artifact_type": "poscar", "local_path": str(_write_file(tmp_path / "src" / "POSCAR", "poscar"))},
+        {"artifact_type": "potcar", "local_path": str(_write_file(tmp_path / "src" / "POTCAR", "potcar"))},
+        {"artifact_type": "chgcar", "local_path": str(_write_file(tmp_path / "src" / "CHGCAR", ""))},
+    ]
+
+    with pytest.raises(ValueError, match="未生成有效的 CHGCAR"):
+        resolver.materialize_inputs("dos_calculation", artifacts, work_dir)
+
+
 def test_band_structure_uses_upstream_artifact_manifest_instead_of_local_task_dir(tmp_path):
     worker = VaspWorker(user_id="u1", base_work_dir=str(tmp_path / "workspace"))
     work_dir = worker.base_work_dir / "band-task"
@@ -83,6 +96,28 @@ def test_band_structure_uses_upstream_artifact_manifest_instead_of_local_task_di
     assert (work_dir / "POSCAR").read_text(encoding="utf-8") == "band-poscar"
     assert (work_dir / "POTCAR").read_text(encoding="utf-8") == "band-potcar"
     assert (work_dir / "CHGCAR").read_text(encoding="utf-8") == "band-chgcar"
+
+
+def test_source_analysis_materializes_manifest_when_local_task_dir_is_gone(tmp_path):
+    worker = VaspWorker(user_id="u1", base_work_dir=str(tmp_path / "workspace"))
+    source_outcar = _write_file(tmp_path / "public" / "OUTCAR", "outcar-data")
+
+    materialized = worker._resolve_source_work_directory(
+        {
+            "source_task_id": "old-source-task",
+            "source_upstream_artifact_manifest": [
+                {
+                    "artifact_type": "outcar",
+                    "filename": "OUTCAR",
+                    "local_path": str(source_outcar),
+                }
+            ],
+        },
+        materialize_root=worker.base_work_dir / "analysis-task" / "_source",
+    )
+
+    assert materialized.name == "_source"
+    assert (materialized / "OUTCAR").read_text(encoding="utf-8") == "outcar-data"
 
 
 def test_band_structure_can_use_uploaded_bundle_with_chgcar(tmp_path, monkeypatch):

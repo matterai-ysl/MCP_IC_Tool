@@ -149,6 +149,7 @@ def test_fail_execution_requeue_does_not_send_notification(task_manager, db_sess
     assert stored_task is not None
     assert stored_task.status == "queued"
     assert stored_task.retry_count == 1
+    assert stored_task.error_message is None
 
 
 def test_fail_execution_terminal_failure_sends_error_notification(task_manager, db_session, monkeypatch):

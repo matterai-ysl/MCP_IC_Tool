@@ -205,6 +205,56 @@ class SCFAnalyzer(BaseAnalyzer):
 
         # 提取最终的SCF能量序列
         self._extract_scf_energies(content)
+        self._merge_oszicar_electronic_steps()
+
+    @staticmethod
+    def _parse_vasp_float(value: str) -> float:
+        return float(value.replace("D", "E").replace("d", "e"))
+
+    def _merge_oszicar_electronic_steps(self):
+        """Use OSZICAR DAV/RMM rows when OUTCAR lacks per-step SCF energies."""
+        oszicar_path = find_vasp_file(self.work_dir, "OSZICAR")
+        if not oszicar_path:
+            return
+
+        try:
+            lines = Path(oszicar_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return
+
+        rows = []
+        row_pattern = re.compile(
+            r"^\s*(?:DAV|RMM):\s+(\d+)\s+([-+0-9.EeDd]+)\s+([-+0-9.EeDd]+)\s+([-+0-9.EeDd]+)"
+        )
+        for line in lines:
+            match = row_pattern.match(line)
+            if not match:
+                continue
+            try:
+                rows.append(
+                    {
+                        "step": int(match.group(1)),
+                        "iteration": 1,
+                        "free_energy": self._parse_vasp_float(match.group(2)),
+                        "energy_change": self._parse_vasp_float(match.group(3)),
+                        "eigenvalue_change": self._parse_vasp_float(match.group(4)),
+                        "energy_sigma0": self._parse_vasp_float(match.group(2)),
+                        "source": "OSZICAR",
+                    }
+                )
+            except ValueError:
+                continue
+
+        if not rows:
+            return
+
+        current_steps = self.data['electronic_convergence'].get('electronic_steps', [])
+        if len(rows) >= len(current_steps):
+            self.data['electronic_convergence']['electronic_steps'] = rows
+            self.data['electronic_convergence']['scf_energies'] = [
+                row['free_energy'] for row in rows if row.get('free_energy') is not None
+            ]
+            print(f"   📊 从 OSZICAR 补充了 {len(rows)} 个电子步")
 
     def _extract_scf_energies(self, content: str):
         """提取SCF能量序列"""
@@ -346,30 +396,48 @@ class SCFAnalyzer(BaseAnalyzer):
             'converged': False
         }
 
-        if scf_energies:
-            # 分析能量收敛
-            if len(scf_energies) > 1:
-                energy_changes = [abs(scf_energies[i] - scf_energies[i-1]) for i in range(1, len(scf_energies))]
-                final_energy_change = energy_changes[-1] if energy_changes else 0
+        ediff = self.data['calculation_settings'].get('EDIFF', 1e-4)
+        try:
+            ediff = float(ediff)
+        except (ValueError, TypeError):
+            ediff = 1e-4
 
-                # 检查收敛标准
-                ediff = self.data['calculation_settings'].get('EDIFF', 1e-4)
-                try:
-                    ediff = float(ediff)
-                except (ValueError, TypeError):
-                    ediff = 1e-4
-                converged = final_energy_change < ediff
+        if electronic_steps:
+            energy_changes = [abs(step.get('energy_change', 0.0)) for step in electronic_steps]
+            eigenvalue_changes = [abs(step.get('eigenvalue_change', 0.0)) for step in electronic_steps]
+            final_energy_change = energy_changes[-1] if energy_changes else 0.0
+            final_eigenvalue_change = eigenvalue_changes[-1] if eigenvalue_changes else final_energy_change
+            final_delta = max(final_energy_change, final_eigenvalue_change)
+            final_energy = electronic_steps[-1].get('free_energy')
+            converged = final_delta < ediff
 
-                convergence_analysis['energy_convergence'] = {
-                    'final_energy': scf_energies[-1],
-                    'final_energy_change': final_energy_change,
-                    'ediff_threshold': ediff,
-                    'converged': converged,
-                    'energy_changes': energy_changes
-                }
+            convergence_analysis['energy_convergence'] = {
+                'final_energy': final_energy,
+                'final_energy_change': final_energy_change,
+                'final_eigenvalue_change': final_eigenvalue_change,
+                'ediff_threshold': ediff,
+                'converged': converged,
+                'energy_changes': energy_changes
+            }
 
-                convergence_analysis['converged'] = converged
-                print(f"   📊 能量收敛: {converged}, 最终变化: {final_energy_change:.2e} eV")
+            convergence_analysis['converged'] = converged
+            print(f"   📊 能量收敛: {converged}, 最终变化: {final_delta:.2e} eV")
+
+        elif scf_energies and len(scf_energies) > 1:
+            energy_changes = [abs(scf_energies[i] - scf_energies[i-1]) for i in range(1, len(scf_energies))]
+            final_energy_change = energy_changes[-1] if energy_changes else 0
+            converged = final_energy_change < ediff
+
+            convergence_analysis['energy_convergence'] = {
+                'final_energy': scf_energies[-1],
+                'final_energy_change': final_energy_change,
+                'ediff_threshold': ediff,
+                'converged': converged,
+                'energy_changes': energy_changes
+            }
+
+            convergence_analysis['converged'] = converged
+            print(f"   📊 能量收敛: {converged}, 最终变化: {final_energy_change:.2e} eV")
 
         self.data['electronic_convergence']['analysis'] = convergence_analysis
 

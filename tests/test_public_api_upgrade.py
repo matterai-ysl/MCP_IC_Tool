@@ -92,6 +92,33 @@ def _register_md_artifact(
     )
 
 
+def _register_public_artifact(
+    db_session,
+    task_id: str,
+    filename: str,
+    *,
+    artifact_type: str,
+    content_type: str = "text/plain",
+):
+    from src.vasp_server.task_manager.models import Artifact
+
+    db_session.add(
+        Artifact(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            owner_type="execution",
+            owner_id="attempt-1",
+            artifact_type=artifact_type,
+            storage_backend="local_public",
+            storage_key=f"/srv/mcp-ic-tool/public_artifacts/tenant/default/tasks/{task_id}/attempts/1/{filename}",
+            object_key=f"tenant/default/tasks/{task_id}/attempts/1/{filename}",
+            mime_type=content_type,
+            content_type=content_type,
+        )
+    )
+    db_session.commit()
+
+
 def test_submit_task_only_creates_db_record_and_returns_task_id(db_session):
     from src.vasp_server.vasp_server_api import app
 
@@ -111,6 +138,33 @@ def test_submit_task_only_creates_db_record_and_returns_task_id(db_session):
     assert task.status == "queued"
     attempts = db_session.query(ExecutionAttempt).filter_by(task_id=payload["task_id"]).all()
     assert attempts == []
+
+
+def test_submit_scf_persists_custom_incar(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    custom_incar = {
+        "ENCUT": 300,
+        "LREAL": "Auto",
+        "LELF": False,
+        "LWAVE": ".FALSE.",
+    }
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/scf-calculation",
+        json={
+            "user_id": "test_user",
+            "cif_url": "https://structures.example.com/Li2O.cif",
+            "custom_incar": custom_incar,
+        },
+    )
+
+    assert response.status_code == 200
+    task = db_session.get(Task, response.json()["task_id"])
+    assert task is not None
+    assert task.params["custom_incar"] == custom_incar
 
 
 def test_local_public_artifact_root_defaults_to_absolute_project_path():
@@ -418,6 +472,39 @@ def test_agent_analyze_task_id_submits_remote_analysis_task(monkeypatch, db_sess
     assert captured["params"]["model"] == "qwen3.5-plus"
 
 
+def test_agent_analyze_task_id_attaches_source_artifact_manifest(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    source_task_id = _create_task(
+        db_session,
+        user_id="test_user",
+        task_type="structure_optimization",
+        status="completed",
+        queue_name="hpc-analysis",
+        result_path=None,
+        result_data={},
+    )
+    _register_public_artifact(db_session, source_task_id, "OUTCAR", artifact_type="outcar")
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/agent/analyze",
+        json={
+            "user_id": "test_user",
+            "task_id": source_task_id,
+            "question": "解释这个优化结果",
+        },
+    )
+
+    assert response.status_code == 200
+    task = db_session.get(Task, response.json()["analysis_task_id"])
+    assert task is not None
+    manifest = task.params["source_upstream_artifact_manifest"]
+    assert manifest[0]["artifact_type"] == "outcar"
+    assert manifest[0]["download_url"].endswith("/OUTCAR")
+
+
 def test_submit_initial_task_accepts_explicit_queue_name(db_session):
     from src.vasp_server.vasp_server_api import app
 
@@ -611,6 +698,34 @@ def test_submit_neb_defaults_to_lighter_template_settings(db_session):
     assert task is not None
     assert task.params["kpoint_density"] == 15.0
     assert task.params["n_images"] == 5
+
+
+def test_submit_neb_task_ids_attach_endpoint_artifact_manifests(db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    initial_task_id = _create_task(db_session, queue_name="hpc-neb")
+    final_task_id = _create_task(db_session, queue_name="hpc-neb")
+    _register_public_artifact(db_session, initial_task_id, "CONTCAR", artifact_type="contcar")
+    _register_public_artifact(db_session, final_task_id, "CONTCAR", artifact_type="contcar")
+
+    response = _request(
+        app,
+        "POST",
+        "/vasp/neb-calculation",
+        json={
+            "user_id": "test_user",
+            "initial_task_id": initial_task_id,
+            "final_task_id": final_task_id,
+        },
+    )
+
+    assert response.status_code == 200
+    task = db_session.get(Task, response.json()["task_id"])
+    assert task is not None
+    assert task.params["initial_upstream_artifact_manifest"][0]["artifact_type"] == "contcar"
+    assert task.params["final_upstream_artifact_manifest"][0]["artifact_type"] == "contcar"
+    assert task.params["initial_upstream_artifact_manifest"][0]["download_url"].endswith("/CONTCAR")
+    assert task.queue_name == "hpc-neb"
 
 
 def test_submit_md_accepts_input_url_and_persists_it(db_session):

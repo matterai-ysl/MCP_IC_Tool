@@ -8,13 +8,16 @@ from html import escape
 import json
 import math
 import os
-import uvicorn
 import logging
 import sys
 import uuid
 from pathlib import Path
 # Config import moved to __main__ block
-from .failure_guidance import derive_failure_guidance, derive_failure_guidance_from_workdir
+from .failure_guidance import (
+    derive_failure_guidance,
+    derive_failure_guidance_from_workdir,
+    guidance_for_failure_type,
+)
 from .internal_worker_api import build_internal_worker_router
 from .errors import APIError, build_api_error
 from .schemas import (
@@ -311,6 +314,8 @@ async def submit_scf_calculation(request: SCFRequest):
             "kpoint_density": request.kpoint_density,
             "precision": request.precision,
         }
+        if request.custom_incar:
+            task_params["custom_incar"] = request.custom_incar
         task_id = task_manager.submit_task(
             user_id=request.user_id,
             task_type="scf_calculation",
@@ -562,6 +567,14 @@ async def submit_neb_calculation(request: NEBRequest):
         }
         if request.custom_incar:
             task_params["custom_incar"] = request.custom_incar
+        if request.initial_task_id:
+            initial_manifest = _get_reusable_artifact_manifest(request.initial_task_id)
+            if initial_manifest:
+                task_params["initial_upstream_artifact_manifest"] = initial_manifest
+        if request.final_task_id:
+            final_manifest = _get_reusable_artifact_manifest(request.final_task_id)
+            if final_manifest:
+                task_params["final_upstream_artifact_manifest"] = final_manifest
 
         task_id = task_manager.submit_task(
             user_id=request.user_id,
@@ -913,6 +926,12 @@ def _derive_task_failure_guidance(task, task_id: str):
         return guidance
 
     if attempt is not None:
+        failure_code = getattr(attempt, "failure_code", None)
+        code_guidance = guidance_for_failure_type(str(failure_code) if failure_code else None)
+        if code_guidance.failure_type:
+            return code_guidance
+
+    if attempt is not None:
         work_directory = getattr(attempt, "work_directory", None)
         if work_directory:
             try:
@@ -1181,6 +1200,14 @@ def _get_completed_source_task(task_id: str, user_id: str):
     return task
 
 
+def _get_reusable_artifact_manifest(task_id: str) -> List[Dict[str, Any]]:
+    try:
+        return task_manager.get_task_artifact_manifest(task_id)
+    except Exception:
+        logger.warning("读取任务 %s 的产物清单失败", task_id, exc_info=True)
+        return []
+
+
 def _submit_remote_analysis_task(
     *,
     analysis_type: str,
@@ -1198,6 +1225,9 @@ def _submit_remote_analysis_task(
         "source_work_directory": source_work_directory,
         "queue_name": getattr(source_task, "queue_name", None) or "default",
     }
+    source_manifest = _get_reusable_artifact_manifest(source_task_id)
+    if source_manifest:
+        params["source_upstream_artifact_manifest"] = source_manifest
     if extra_params:
         params.update(extra_params)
 
@@ -2236,4 +2266,6 @@ async def agent_analyze(request: AgentAnalyzeRequest):
 
 if __name__ == "__main__":
     from .Config import VASP_remote_run_port
+    import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=VASP_remote_run_port)

@@ -46,6 +46,17 @@ def test_claim_task_assigns_worker_and_lease_token(task_manager, db_session):
     assert stored_task.lease_expires_at is not None
 
 
+def test_claim_task_clears_stale_error_message(task_manager, db_session):
+    task_id = _create_task(db_session, error_message="previous transient failure")
+
+    claimed = task_manager.claim_next_task(worker_id="hpc-a", queue_name="default")
+
+    assert claimed is not None
+    stored_task = db_session.get(Task, task_id)
+    assert stored_task is not None
+    assert stored_task.error_message is None
+
+
 def test_only_one_worker_can_claim_same_queued_task(task_manager, db_session):
     _create_task(db_session)
 
@@ -99,6 +110,33 @@ def test_claim_task_automatically_requeues_expired_leases_before_claiming(task_m
     assert refreshed_task.worker_id == "hpc-b"
     assert refreshed_task.lease_token == claimed.lease_token
     assert refreshed_task.lease_expires_at is not None
+
+
+def test_claim_task_reclaims_orphaned_running_task_before_claiming(task_manager, db_session):
+    task_id = _create_task(
+        db_session,
+        status="running",
+        worker_id="hpc-dead",
+        lease_token="dead-lease",
+        heartbeat_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        current_execution_attempt_id="attempt-stale",
+        error_message="stale error",
+        retry_count=0,
+        max_retries=1,
+    )
+
+    claimed = task_manager.claim_next_task(worker_id="hpc-b", queue_name="default")
+
+    assert claimed is not None
+    assert claimed.id == task_id
+    assert claimed.worker_id == "hpc-b"
+    stored_task = db_session.get(Task, task_id)
+    assert stored_task is not None
+    assert stored_task.status == "leased"
+    assert stored_task.retry_count == 1
+    assert stored_task.current_execution_attempt_id is None
+    assert stored_task.error_message is None
 
 
 def test_cancel_requested_task_is_never_newly_claimed(task_manager, db_session):
@@ -296,3 +334,20 @@ def test_fail_execution_creates_failed_attempt_for_distributed_worker(task_manag
     assert stored_task is not None
     assert stored_task.status == "failed"
     assert stored_task.current_execution_attempt_id == attempts[0].id
+
+
+def test_mark_task_running_clears_stale_error_message(task_manager, db_session):
+    task_id = _create_task(
+        db_session,
+        status="leased",
+        worker_id="hpc-a",
+        lease_token="lease-1",
+        error_message="previous transient failure",
+    )
+
+    task_manager.mark_task_running(task_id=task_id, lease_token="lease-1", worker_id="hpc-a")
+
+    stored_task = db_session.get(Task, task_id)
+    assert stored_task is not None
+    assert stored_task.status == "running"
+    assert stored_task.error_message is None

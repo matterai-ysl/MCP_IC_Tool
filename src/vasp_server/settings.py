@@ -90,6 +90,7 @@ class VaspServerSettings(BaseSettings):
     slurm_ntasks: int = 80
     slurm_tasks_per_node: int = 40
     slurm_partition: str = "p1"
+    slurm_gpus: Optional[int] = None
     slurm_time_limit: str = "24:00:00"
     slurm_module_load: Optional[str] = None
     oneapi_env_script: Optional[str] = None

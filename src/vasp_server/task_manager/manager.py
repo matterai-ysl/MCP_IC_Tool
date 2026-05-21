@@ -755,6 +755,7 @@ class TaskManager:
         return task
 
     def claim_next_task(self, worker_id: str, queue_name: str) -> Optional[SimpleNamespace]:
+        self.mark_orphaned_running_tasks()
         self.requeue_expired_leases(queue_name=queue_name)
 
         db: Session = SessionLocal()
@@ -780,6 +781,7 @@ class TaskManager:
             task.lease_token = uuid.uuid4().hex  # type: ignore
             task.lease_expires_at = self._lease_expiration(now)  # type: ignore
             task.heartbeat_at = now  # type: ignore
+            task.error_message = None  # type: ignore
             db.add(task)
             db.commit()
             db.refresh(task)
@@ -806,6 +808,7 @@ class TaskManager:
             task.lease_token = uuid.uuid4().hex  # type: ignore
             task.lease_expires_at = self._lease_expiration(now)  # type: ignore
             task.heartbeat_at = now  # type: ignore
+            task.error_message = None  # type: ignore
             db.add(task)
             db.commit()
             db.refresh(task)
@@ -833,6 +836,7 @@ class TaskManager:
         try:
             task = self._validate_lease(db, task_id, lease_token, worker_id)
             task.status = "running"  # type: ignore
+            task.error_message = None  # type: ignore
             db.add(task)
             db.commit()
         finally:
@@ -953,8 +957,6 @@ class TaskManager:
                 return
 
             should_requeue = _is_retryable_error(error_message) and task.retry_count < task.max_retries
-            task.error_message = error_message  # type: ignore
-
             if should_requeue:
                 task.retry_count = (task.retry_count or 0) + 1  # type: ignore
                 task.status = "queued"  # type: ignore
@@ -963,12 +965,14 @@ class TaskManager:
                 task.lease_expires_at = None  # type: ignore
                 task.heartbeat_at = None  # type: ignore
                 task.current_execution_attempt_id = None  # type: ignore
+                task.error_message = None  # type: ignore
             else:
                 task.status = "failed"  # type: ignore
                 task.finalized_at = datetime.now(timezone.utc)  # type: ignore
                 task.worker_id = None  # type: ignore
                 task.lease_token = None  # type: ignore
                 task.lease_expires_at = None  # type: ignore
+                task.error_message = error_message  # type: ignore
 
             db.add(task)
             db.commit()
@@ -1025,12 +1029,16 @@ class TaskManager:
                 if task.retry_count < task.max_retries:
                     task.retry_count = (task.retry_count or 0) + 1  # type: ignore
                     task.status = "queued"  # type: ignore
+                    task.error_message = None  # type: ignore
+                    task.current_execution_attempt_id = None  # type: ignore
                 else:
                     task.status = "failed"  # type: ignore
                     task.finalized_at = now  # type: ignore
+                    task.error_message = "Worker 心跳超时，任务失去执行进度，已终止"  # type: ignore
                 task.worker_id = None  # type: ignore
                 task.lease_token = None  # type: ignore
                 task.lease_expires_at = None  # type: ignore
+                task.heartbeat_at = None  # type: ignore
                 db.add(task)
 
             db.commit()

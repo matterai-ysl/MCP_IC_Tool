@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .failure_guidance import derive_failure_guidance_from_workdir
+from .failure_guidance import FailureGuidance, derive_failure_guidance, derive_failure_guidance_from_workdir
 from .settings import settings
 from .vasp_worker import VaspWorker
 from .worker_client import ControlPlaneClient
@@ -122,6 +122,7 @@ class PullWorker:
         *,
         scheduler_job_id: Optional[str],
         work_directory: Optional[str],
+        extras: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         context: dict[str, Any] = {}
         if scheduler_job_id:
@@ -130,7 +131,70 @@ class PullWorker:
                 context["process_id"] = int(str(scheduler_job_id))
         if work_directory:
             context["work_directory"] = str(work_directory)
+        if extras:
+            context.update(extras)
         return context
+
+    @staticmethod
+    def _append_failure_guidance(error_message: str, guidance: FailureGuidance) -> str:
+        parts = [error_message or "任务执行失败"]
+        if guidance.reason and guidance.reason not in parts[0]:
+            parts.append(f"诊断: {guidance.reason}")
+        if guidance.suggested_action and guidance.suggested_action not in parts[0]:
+            parts.append(f"建议给智能体的下一步: {guidance.suggested_action}")
+        return "\n".join(parts)
+
+    def _derive_failure_guidance_for_report(
+        self,
+        *,
+        error_message: str,
+        task_type: str,
+        work_directory: Optional[str],
+    ) -> FailureGuidance:
+        guidance = derive_failure_guidance(error_message, task_type=task_type)
+        if guidance.failure_type:
+            return guidance
+
+        if work_directory:
+            try:
+                return derive_failure_guidance_from_workdir(Path(str(work_directory)), task_type=task_type)
+            except OSError:
+                return FailureGuidance()
+        return FailureGuidance()
+
+    def _build_guided_failure_payload(
+        self,
+        *,
+        task_id: str,
+        task_type: str,
+        error_message: str,
+        scheduler_job_id: Optional[str],
+        work_directory: Optional[str],
+        extras: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        guidance = self._derive_failure_guidance_for_report(
+            error_message=error_message,
+            task_type=task_type,
+            work_directory=work_directory,
+        )
+        failure_extras = dict(extras or {})
+        if guidance.failure_type:
+            failure_extras["failure_type"] = guidance.failure_type
+        if guidance.reason:
+            failure_extras["failure_reason"] = guidance.reason
+        if guidance.suggested_action:
+            failure_extras["suggested_action"] = guidance.suggested_action
+
+        return {
+            "error_message": self._append_failure_guidance(error_message, guidance),
+            "failure_code": guidance.failure_type,
+            "failure_context": self._build_failure_context(
+                scheduler_job_id=scheduler_job_id,
+                work_directory=work_directory,
+                extras=failure_extras,
+            ),
+            "artifact_manifest": self._collect_and_stage_public_artifacts(task_id, {"work_directory": work_directory}),
+        }
 
     def run_loop(self, iterations: Optional[int] = None) -> None:
         completed = 0
@@ -222,20 +286,23 @@ class PullWorker:
                 heartbeat_state,
             )
             result = self._run_task(task_type, task_id, params, progress_callback)
+            result.setdefault("work_directory", str(self._default_work_directory(task_id)))
             self._stop_background_heartbeat(heartbeat_stop_event, heartbeat_thread)
             cancel_requested = cancel_requested or bool(heartbeat_state.get("cancel_requested"))
             if cancel_requested:
                 self._ack_cancel(task_id, lease_token)
                 return True
-            if not self._is_success(task_type, result):
-                payload = {
-                    "error_message": result.get("error") or result.get("error_message") or "任务执行失败",
-                    "failure_context": self._build_failure_context(
-                        scheduler_job_id=scheduler_job_id,
-                        work_directory=result.get("work_directory") or str(self._default_work_directory(task_id)),
-                    ),
-                    "artifact_manifest": self._collect_and_stage_public_artifacts(task_id, result),
-                }
+            succeeded, error_message, failure_extras = self._classify_result(task_type, result)
+            if not succeeded:
+                work_directory = result.get("work_directory") or str(self._default_work_directory(task_id))
+                payload = self._build_guided_failure_payload(
+                    task_id=task_id,
+                    task_type=task_type,
+                    error_message=error_message or "任务执行失败",
+                    scheduler_job_id=scheduler_job_id,
+                    work_directory=work_directory,
+                    extras=failure_extras,
+                )
                 self._report_failure(task_id, lease_token, payload)
                 return True
 
@@ -248,17 +315,17 @@ class PullWorker:
         except TaskCanceled:
             return True
         except Exception as exc:
+            work_directory = str(self._default_work_directory(task_id))
             self._report_failure(
                 task_id,
                 lease_token,
-                {
-                    "error_message": str(exc),
-                    "failure_context": self._build_failure_context(
-                        scheduler_job_id=scheduler_job_id,
-                        work_directory=str(self._default_work_directory(task_id)),
-                    ),
-                    "artifact_manifest": self._collect_and_stage_public_artifacts(task_id, {}),
-                },
+                self._build_guided_failure_payload(
+                    task_id=task_id,
+                    task_type=task_type,
+                    error_message=str(exc),
+                    scheduler_job_id=scheduler_job_id,
+                    work_directory=work_directory,
+                ),
             )
             return True
         finally:
@@ -273,12 +340,52 @@ class PullWorker:
         worker_method = getattr(self.execution_worker, method_name)
         return asyncio.run(worker_method(task_id, params, progress_callback))
 
+    @staticmethod
+    def _has_nonempty_file(path: Path) -> bool:
+        return path.exists() and path.is_file() and path.stat().st_size > 0
+
+    def _validate_success_result(self, task_type: str, result: dict[str, Any]) -> tuple[Optional[str], dict[str, Any]]:
+        work_directory = result.get("work_directory")
+        if not work_directory:
+            return None, {}
+
+        work_dir = Path(str(work_directory))
+        if task_type == "scf_calculation":
+            missing_outputs = [
+                filename
+                for filename in ("CHGCAR",)
+                if not self._has_nonempty_file(work_dir / filename)
+            ]
+            if missing_outputs:
+                return (
+                    "SCF任务未生成有效的 CHGCAR，当前结果不能作为后续 DOS / 能带计算的上游输入",
+                    {
+                        "validation_stage": "result_validation",
+                        "missing_outputs": missing_outputs,
+                    },
+                )
+
+        return None, {}
+
+    def _classify_result(self, task_type: str, result: dict[str, Any]) -> tuple[bool, Optional[str], dict[str, Any]]:
+        succeeded = result.get("success") is True or (
+            task_type == "md_calculation" and result.get("convergence")
+        )
+        if not succeeded:
+            return (
+                False,
+                result.get("error") or result.get("error_message") or "任务执行失败",
+                {},
+            )
+
+        validation_error, extras = self._validate_success_result(task_type, result)
+        if validation_error:
+            return False, validation_error, extras
+        return True, None, {}
+
     def _is_success(self, task_type: str, result: dict[str, Any]) -> bool:
-        if result.get("success") is True:
-            return True
-        if task_type == "md_calculation" and result.get("convergence"):
-            return True
-        return False
+        succeeded, _, _ = self._classify_result(task_type, result)
+        return succeeded
 
     def _call_control_plane_with_retries(
         self,
@@ -655,6 +762,7 @@ class PullWorker:
                 scheduler_job_id=scheduler_job_id,
                 started_at=state.get("started_at"),
             )
+            result.setdefault("work_directory", str(work_dir))
             payload = {
                 "result_data": result,
                 "artifact_manifest": self._stage_public_artifacts(
@@ -662,20 +770,21 @@ class PullWorker:
                     self._collect_artifact_manifest(str(work_dir)),
                 ),
             }
-            if self._is_success(task_type, result):
+            succeeded, error_message, failure_extras = self._classify_result(task_type, result)
+            if succeeded:
                 self._report_completion(task_id, str(lease_token), payload)
             else:
                 self._report_failure(
                     task_id,
                     str(lease_token),
-                    {
-                        "error_message": result.get("error") or "恢复结果分析失败",
-                        "failure_context": self._build_failure_context(
-                            scheduler_job_id=scheduler_job_id,
-                            work_directory=str(work_dir),
-                        ),
-                        "artifact_manifest": payload["artifact_manifest"],
-                    },
+                    self._build_guided_failure_payload(
+                        task_id=task_id,
+                        task_type=task_type,
+                        error_message=error_message or "恢复结果分析失败",
+                        scheduler_job_id=scheduler_job_id,
+                        work_directory=str(work_dir),
+                        extras=failure_extras,
+                    ),
                 )
             return True
 
@@ -683,17 +792,13 @@ class PullWorker:
             self._report_failure(
                 task_id,
                 str(lease_token),
-                {
-                    "error_message": self._build_scheduler_failure_message(scheduler_state, work_dir),
-                    "failure_context": self._build_failure_context(
-                        scheduler_job_id=scheduler_job_id,
-                        work_directory=str(work_dir),
-                    ),
-                    "artifact_manifest": self._stage_public_artifacts(
-                        task_id,
-                        self._collect_artifact_manifest(str(work_dir)),
-                    ),
-                },
+                self._build_guided_failure_payload(
+                    task_id=task_id,
+                    task_type=task_type,
+                    error_message=self._build_scheduler_failure_message(scheduler_state, work_dir),
+                    scheduler_job_id=scheduler_job_id,
+                    work_directory=str(work_dir),
+                ),
             )
             return True
 

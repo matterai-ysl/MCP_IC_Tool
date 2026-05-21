@@ -106,6 +106,41 @@ def test_task_status_returns_suggested_action_for_scf_like_numeric_failure(task_
     assert "CHGCAR" in payload["suggested_action"]
 
 
+def test_task_status_returns_suggested_action_from_failure_code(task_manager, db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    task_id = _create_task(
+        db_session,
+        status="failed",
+        analysis_status="pending",
+        result_summary=None,
+        error_message="结构优化计算失败: VASP计算执行失败: 作业最终状态为 FAILED",
+        result_data=None,
+        result_path=None,
+    )
+    db_session.add(
+        ExecutionAttempt(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            attempt_no=1,
+            executor_type="slurm",
+            status="runtime_failed",
+            scheduler_job_id="12345",
+            work_directory="/data/home/ysl9527/vasp_calculations/hpc-c2ln6/task",
+            failure_code="electronic_divergence",
+            failure_detail="结构优化计算失败: VASP计算执行失败: 作业最终状态为 FAILED",
+        )
+    )
+    db_session.commit()
+
+    response = _request(app, "GET", f"/vasp/task/{task_id}", params={"user_id": "test_user"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failure_type"] == "electronic_divergence"
+    assert "先对该结构做一次 SCF" in payload["suggested_action"]
+
+
 def test_task_status_returns_suggested_action_for_lattice_inconsistency(task_manager, db_session):
     from src.vasp_server.vasp_server_api import app
 
@@ -142,6 +177,80 @@ def test_task_status_returns_suggested_action_for_lattice_inconsistency(task_man
     assert payload["failure_type"] == "lattice_inconsistency"
     assert "晶格参数" in payload["suggested_action"]
     assert "重新导出" in payload["suggested_action"] or "规范化" in payload["suggested_action"]
+
+
+def test_task_status_returns_suggested_action_for_disordered_structure(task_manager, db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    task_id = _create_task(
+        db_session,
+        status="failed",
+        analysis_status="pending",
+        result_summary=None,
+        error_message=(
+            "自定义计算失败: Disordered structure with partial occupancies "
+            "cannot be converted into POSCAR!"
+        ),
+        result_data=None,
+        result_path=None,
+    )
+    db_session.add(
+        ExecutionAttempt(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            attempt_no=1,
+            executor_type="worker",
+            status="runtime_failed",
+            work_directory="/tmp/disordered-structure",
+            failure_detail=(
+                "Disordered structure with partial occupancies cannot be converted into POSCAR!"
+            ),
+        )
+    )
+    db_session.commit()
+
+    response = _request(app, "GET", f"/vasp/task/{task_id}", params={"user_id": "test_user"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failure_type"] == "disordered_structure"
+    assert "小数占位" in payload["suggested_action"]
+    assert "POSCAR" in payload["suggested_action"]
+
+
+def test_task_status_returns_suggested_action_for_disk_quota_failure(task_manager, db_session):
+    from src.vasp_server.vasp_server_api import app
+
+    task_id = _create_task(
+        db_session,
+        status="failed",
+        analysis_status="pending",
+        result_summary=None,
+        error_message="VASP计算执行失败: forrtl: Disk quota exceeded",
+        result_data=None,
+        result_path=None,
+    )
+    db_session.add(
+        ExecutionAttempt(
+            id=uuid.uuid4().hex,
+            task_id=task_id,
+            attempt_no=1,
+            executor_type="slurm",
+            status="runtime_failed",
+            scheduler_job_id="12349",
+            work_directory="/tmp/quota-failure",
+            failure_detail="forrtl: severe (38): error during write, file vasprun.xml",
+        )
+    )
+    db_session.commit()
+
+    response = _request(app, "GET", f"/vasp/task/{task_id}", params={"user_id": "test_user"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failure_type"] == "disk_quota_exceeded"
+    assert "配额" in payload["suggested_action"]
+    assert "vasp_calculations" in payload["suggested_action"]
 
 
 def test_remote_analysis_response_includes_failure_type(db_session):

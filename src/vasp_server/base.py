@@ -106,7 +106,9 @@ def _sanitize_structure_for_vasp(structure):
     except ImportError as exc:
         raise RuntimeError("需要安装 pymatgen 以处理结构文件") from exc
 
-    zero_tol = 1e-12
+    # CIF/POSCAR exporters often leave tiny near-zero lattice components around
+    # 1e-4 Angstrom, which can still trip VASP symmetry / k-mesh checks.
+    zero_tol = 5e-4
     lattice_matrix = []
     for vector in structure.lattice.matrix:
         cleaned_vector = []

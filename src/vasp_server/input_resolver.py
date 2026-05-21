@@ -26,7 +26,7 @@ class UpstreamInputResolver:
             raise FileNotFoundError("上游产物中缺少 CONTCAR 或 POSCAR")
 
         destination = work_dir / "POSCAR"
-        self._materialize_artifact(source, destination)
+        self._materialize_artifact(source, destination, require_nonempty=True)
         return {"POSCAR": str(destination)}
 
     def resolve_single_structure(self, artifacts: list[dict], work_dir: Path, dest_name: str = "POSCAR") -> dict[str, str]:
@@ -35,7 +35,7 @@ class UpstreamInputResolver:
             raise FileNotFoundError("上游产物中缺少 CONTCAR 或 POSCAR")
 
         destination = work_dir / dest_name
-        self._materialize_artifact(source, destination)
+        self._materialize_artifact(source, destination, require_nonempty=True)
         return {dest_name: str(destination)}
 
     def resolve_for_dos(self, artifacts: list[dict], work_dir: Path) -> dict[str, str]:
@@ -55,7 +55,16 @@ class UpstreamInputResolver:
                     raise FileNotFoundError(f"上游产物中缺少关键文件 {target_name}")
                 continue
             destination = work_dir / target_name
-            self._materialize_artifact(source, destination)
+            self._materialize_artifact(
+                source,
+                destination,
+                require_nonempty=target_name in {"POSCAR", "POTCAR", "CHGCAR"},
+                empty_error=(
+                    "上游产物中的 CHGCAR 为空，未生成有效的 CHGCAR"
+                    if target_name == "CHGCAR"
+                    else f"上游产物中的 {target_name} 为空"
+                ),
+            )
             copied_files[target_name] = str(destination)
 
         return copied_files
@@ -76,7 +85,16 @@ class UpstreamInputResolver:
                     raise FileNotFoundError(f"上游产物中缺少关键文件 {target_name}")
                 continue
             destination = work_dir / target_name
-            self._materialize_artifact(source, destination)
+            self._materialize_artifact(
+                source,
+                destination,
+                require_nonempty=target_name in required,
+                empty_error=(
+                    "上游产物中的 CHGCAR 为空，未生成有效的 CHGCAR"
+                    if target_name == "CHGCAR"
+                    else f"上游产物中的 {target_name} 为空"
+                ),
+            )
             copied_files[target_name] = str(destination)
         return copied_files
 
@@ -91,7 +109,7 @@ class UpstreamInputResolver:
             if source is None:
                 raise FileNotFoundError(f"上游产物中缺少关键文件 {target_name}")
             destination = work_dir / target_name
-            self._materialize_artifact(source, destination)
+            self._materialize_artifact(source, destination, require_nonempty=True)
             copied_files[target_name] = str(destination)
         return copied_files
 
@@ -110,7 +128,14 @@ class UpstreamInputResolver:
                 return artifact
         return None
 
-    def _materialize_artifact(self, artifact: dict[str, Any], destination: Path) -> None:
+    def _materialize_artifact(
+        self,
+        artifact: dict[str, Any],
+        destination: Path,
+        *,
+        require_nonempty: bool = False,
+        empty_error: str | None = None,
+    ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         for key in ("local_path", "source_path", "storage_key"):
@@ -120,6 +145,7 @@ class UpstreamInputResolver:
             src = Path(str(source_path))
             if src.exists():
                 shutil.copy(str(src), str(destination))
+                self._ensure_materialized_file(destination, require_nonempty=require_nonempty, empty_error=empty_error)
                 return
 
         download_url = artifact.get("download_url")
@@ -127,6 +153,35 @@ class UpstreamInputResolver:
             response = requests.get(str(download_url), timeout=60)
             response.raise_for_status()
             destination.write_bytes(response.content)
+            self._ensure_materialized_file(destination, require_nonempty=require_nonempty, empty_error=empty_error)
             return
 
         raise FileNotFoundError(f"产物缺少可用源路径: {artifact}")
+
+    def materialize_artifact(
+        self,
+        artifact: dict[str, Any],
+        destination: Path,
+        *,
+        require_nonempty: bool = False,
+        empty_error: str | None = None,
+    ) -> None:
+        self._materialize_artifact(
+            artifact,
+            destination,
+            require_nonempty=require_nonempty,
+            empty_error=empty_error,
+        )
+
+    @staticmethod
+    def _ensure_materialized_file(
+        destination: Path,
+        *,
+        require_nonempty: bool = False,
+        empty_error: str | None = None,
+    ) -> None:
+        if not require_nonempty:
+            return
+        if destination.stat().st_size > 0:
+            return
+        raise ValueError(empty_error or f"{destination.name} 为空")

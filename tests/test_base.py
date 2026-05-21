@@ -130,6 +130,31 @@ loop_
     assert second_vector[2] == 0.0
 
 
+def test_sanitize_structure_for_vasp_cleans_export_noise_above_machine_epsilon():
+    from pymatgen.core import Lattice, Structure
+
+    from src.vasp_server.base import _sanitize_structure_for_vasp
+
+    structure = Structure(
+        Lattice(
+            [
+                [6.9190822385541466, 0.0, -0.0001414495007766],
+                [0.0000139245219281, 5.1353799097168578, 3.7953479789363485],
+                [0.0, 0.0, 8.0732772500000003],
+            ]
+        ),
+        ["Eu", "P"],
+        [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    )
+
+    sanitized = _sanitize_structure_for_vasp(structure)
+    first_vector = sanitized.lattice.matrix[0]
+    second_vector = sanitized.lattice.matrix[1]
+
+    assert first_vector[2] == 0.0
+    assert second_vector[0] == 0.0
+
+
 def test_generate_kpoints_respects_explicit_target_product(tmp_path):
     from src.vasp_server.base import generate_kpoints
 
@@ -218,6 +243,34 @@ def test_generate_single_point_dos_incar_uses_lighter_defaults(monkeypatch, tmp_
     assert "NELMIN = 2" in incar_text
     assert "NELM = 120" in incar_text
     assert "NEDOS = 1500" in incar_text
+
+
+def test_generate_single_point_dos_incar_falls_back_to_gaussian_for_sparse_mesh(monkeypatch, tmp_path):
+    from src.vasp_server.vasp_worker import VaspWorker
+
+    work_dir = tmp_path / "dos-sparse-kmesh"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    _write_li_mn_o_poscar(work_dir)
+    (work_dir / "KPOINTS").write_text(
+        "Automatically generated K-points\n0\nGamma\n3 1 1\n0 0 0\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "src.vasp_server.base.load_u_values",
+        lambda _path: {"Li": 0.0, "Mn": 4.0, "O": 0.0},
+    )
+
+    worker = VaspWorker(user_id="test-user", base_work_dir=str(tmp_path))
+    params = {"precision": "High"}
+
+    asyncio.run(worker._generate_single_point_dos_incar(work_dir, params))
+
+    incar_text = (work_dir / "INCAR").read_text(encoding="utf-8")
+    assert "ISMEAR = 0" in incar_text
+    assert "ISMEAR = -5" not in incar_text
+    assert "SIGMA = 0.05" in incar_text
+    assert params["_dos_smearing_mode"] == "gaussian"
 
 
 def test_modify_incar_for_band_structure_respects_lighter_precision(monkeypatch, tmp_path):

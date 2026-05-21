@@ -407,7 +407,9 @@ class BandStructureAnalyzer(BaseAnalyzer):
         try:
             from pymatgen.io.vasp import Vasprun
 
-            vasprun = Vasprun(str(vasprun_path), parse_projected_eigen=True)
+            # Projected eigen parsing dramatically increases memory usage for
+            # large band jobs and is not required for the core report fields.
+            vasprun = Vasprun(str(vasprun_path), parse_projected_eigen=False)
             bs = vasprun.get_band_structure(line_mode=True)
 
             gap_info = bs.get_band_gap()
