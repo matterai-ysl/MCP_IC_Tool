@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List
 
 from fastmcp import FastMCP, Context
 
@@ -63,10 +63,10 @@ def get_user_id(ctx: Context) -> str:
 
 @mcp.tool()
 async def submit_structure_optimization(
-    cif_url: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    kpoint_density: Optional[float] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    cif_url: str = None,
+    queue_name: str = None,
+    kpoint_density: float = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
@@ -95,12 +95,12 @@ async def submit_structure_optimization(
 
 @mcp.tool()
 async def submit_scf_calculation(
-    cif_url: Optional[str] = None,
-    optimized_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    kpoint_density: Optional[float] = None,
-    precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    cif_url: str = None,
+    optimized_task_id: str = None,
+    queue_name: str = None,
+    kpoint_density: float = None,
+    precision: str = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
@@ -130,13 +130,14 @@ async def submit_scf_calculation(
 
 @mcp.tool()
 async def submit_dos_calculation(
-    input_url: Optional[Union[str, List[str]]] = None,
-    scf_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    kpoint_density: Optional[float] = None,
-    kpoint_multiplier: Optional[float] = None,
-    precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    input_url: str = None,
+    input_urls: List[str] = None,
+    scf_task_id: str = None,
+    queue_name: str = None,
+    kpoint_density: float = None,
+    kpoint_multiplier: float = None,
+    precision: str = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
@@ -148,11 +149,11 @@ async def submit_dos_calculation(
     Override any parameter via custom_incar.
 
     Parameters:
-    - input_url (optional): Unified external input source. Supported forms:
+    - input_url (optional): Single external input URL. Supported forms:
       1. Single structure file URL such as .cif, which runs single-point SCF + DOS.
       2. Single zip/tar.gz bundle URL.
-      3. URL array such as [".../POSCAR", ".../POTCAR", ".../CHGCAR", ".../INCAR"].
-         If CHGCAR is available, DOS directly reuses it; otherwise the system runs SCF + DOS.
+    - input_urls (optional): URL array such as [".../POSCAR", ".../POTCAR", ".../CHGCAR", ".../INCAR"].
+      If CHGCAR is available, DOS directly reuses it; otherwise the system runs SCF + DOS.
     - scf_task_id (optional): Completed SCF task ID
     - kpoint_density (optional): default 20.0
     - kpoint_multiplier (optional): K-point multiplier vs optimization, default 1.5
@@ -163,8 +164,16 @@ async def submit_dos_calculation(
     Examples:
     submit_dos_calculation(scf_task_id="scf_001", kpoint_multiplier=3.0)
     submit_dos_calculation(input_url="https://example.com/structure.cif", custom_incar={"LORBIT": 11, "NEDOS": 3000})
+    submit_dos_calculation(input_urls=["https://example.com/POSCAR", "https://example.com/POTCAR", "https://example.com/CHGCAR"])
     """
-    params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
+    if input_url and input_urls:
+        raise ValueError("Use either input_url or input_urls, not both")
+    params = {
+        k: v for k, v in locals().items()
+        if v is not None and k not in ("ctx", "input_urls")
+    }
+    if input_urls:
+        params["input_url"] = input_urls
     params["user_id"] = get_user_id(ctx)
     payload = DOSInput(**params).model_dump(mode="json", by_alias=True)
     return await client.submit_dos(payload)
@@ -172,13 +181,14 @@ async def submit_dos_calculation(
 
 @mcp.tool()
 async def submit_band_structure_calculation(
-    input_url: Optional[Union[str, List[str]]] = None,
-    scf_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    kpoint_density: Optional[float] = None,
-    line_density: Optional[int] = None,
-    precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    input_url: str = None,
+    input_urls: List[str] = None,
+    scf_task_id: str = None,
+    queue_name: str = None,
+    kpoint_density: float = None,
+    line_density: int = None,
+    precision: str = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -194,11 +204,10 @@ async def submit_band_structure_calculation(
     using pymatgen's HighSymmKpath.
 
     Parameters:
-    - input_url (optional): Unified external input source. Supported forms:
-      1. Single URL string, such as a .cif file or a zip/tar.gz bundle.
-      2. URL array, such as [".../POSCAR", ".../POTCAR", ".../CHGCAR"].
-      3. URL array with only structure inputs, such as [".../structure.cif", ".../POTCAR"],
-         in which case the system automatically runs SCF seed -> Band.
+    - input_url (optional): Single external input URL, such as a .cif file or a zip/tar.gz bundle.
+    - input_urls (optional): URL array, such as [".../POSCAR", ".../POTCAR", ".../CHGCAR"].
+      It can also contain only structure inputs, such as [".../structure.cif", ".../POTCAR"],
+      in which case the system automatically runs SCF seed -> Band.
     - scf_task_id (optional): Completed SCF task ID (recommended when available).
       This directly reuses the upstream CHGCAR and runs standard NSCF band structure.
     - kpoint_density (optional): K-point density for the internal SCF seed step, default 20.0
@@ -210,9 +219,16 @@ async def submit_band_structure_calculation(
     Examples:
     submit_band_structure_calculation(scf_task_id="scf_001")
     submit_band_structure_calculation(input_url="https://example.com/structure.cif", line_density=30)
-    submit_band_structure_calculation(input_url=["https://example.com/POSCAR", "https://example.com/POTCAR", "https://example.com/CHGCAR"])
+    submit_band_structure_calculation(input_urls=["https://example.com/POSCAR", "https://example.com/POTCAR", "https://example.com/CHGCAR"])
     """
-    params = {k: v for k, v in locals().items() if v is not None and k != "ctx"}
+    if input_url and input_urls:
+        raise ValueError("Use either input_url or input_urls, not both")
+    params = {
+        k: v for k, v in locals().items()
+        if v is not None and k not in ("ctx", "input_urls")
+    }
+    if input_urls:
+        params["input_url"] = input_urls
     params["user_id"] = get_user_id(ctx)
     payload = BandStructureInput(**params).model_dump(mode="json", by_alias=True)
     return await client.submit_band_structure(payload)
@@ -220,15 +236,16 @@ async def submit_band_structure_calculation(
 
 @mcp.tool()
 async def submit_md_calculation(
-    input_url: Optional[str] = None,
-    scf_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    md_steps: Optional[int] = None,
-    temperature: Optional[Any] = None,
-    time_step: Optional[float] = None,
-    ensemble: Optional[str] = None,
-    precision: Optional[str] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    input_url: str = None,
+    scf_task_id: str = None,
+    queue_name: str = None,
+    md_steps: int = None,
+    temperature: float = None,
+    temperatures: List[float] = None,
+    time_step: float = None,
+    ensemble: str = None,
+    precision: str = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None #type: ignore
 ) -> Dict[str, Any]:
     """
@@ -248,7 +265,8 @@ async def submit_md_calculation(
     - input_url (optional): URL of structure file or a single structure input bundle URL (zip/tar.gz)
     - scf_task_id (optional): Completed SCF task ID
     - md_steps (optional): Number of MD steps, default 1000
-    - temperature (optional): Target temperature (K). Single float (300.0) or list of floats ([300, 400, 500])
+    - temperature (optional): Target temperature (K), e.g. 300.0
+    - temperatures (optional): Multiple target temperatures (K), e.g. [300, 400, 500]
     - time_step (optional): Time step (fs), default 1.0
     - ensemble (optional): "NVT"/"NVE"/"NPT", default "NVT"
     - precision (optional): "Normal"/"High"/"Accurate", default "Normal"
@@ -260,31 +278,34 @@ async def submit_md_calculation(
 
     Examples:
     submit_md_calculation(input_url="https://example.com/structure.cif", md_steps=2000, temperature=350.0)
-    submit_md_calculation(input_url="https://example.com/structure.cif", temperature=[300.0, 400.0, 500.0], md_steps=1500)
+    submit_md_calculation(input_url="https://example.com/structure.cif", temperatures=[300.0, 400.0, 500.0], md_steps=1500)
     """
     user_id = get_user_id(ctx)
 
+    if temperature is not None and temperatures:
+        raise ValueError("Use either temperature or temperatures, not both")
+
     # 判断是否为多温度
-    temperatures: list
-    if temperature is not None and isinstance(temperature, list):
-        temperatures = [float(t) for t in temperature]
+    selected_temperatures: list
+    if temperatures:
+        selected_temperatures = [float(t) for t in temperatures]
     else:
-        temperatures = [float(temperature) if temperature is not None else 300.0]
+        selected_temperatures = [float(temperature) if temperature is not None else 300.0]
 
     # 构建共享参数（不含 temperature）
     base_params = {k: v for k, v in locals().items()
-                   if v is not None and k not in ("ctx", "temperature", "temperatures", "user_id")}
+                   if v is not None and k not in ("ctx", "temperature", "temperatures", "selected_temperatures", "user_id")}
     base_params["user_id"] = user_id
 
-    if len(temperatures) == 1:
+    if len(selected_temperatures) == 1:
         # 单温度 — 直接提交，返回原有格式
-        base_params["temperature"] = temperatures[0]
+        base_params["temperature"] = selected_temperatures[0]
         payload = MDInput(**base_params).model_dump(mode="json", by_alias=True)
         return await client.submit_md(payload)
     else:
         # 多温度 — 逐个提交独立任务
         results = []
-        for temp in temperatures:
+        for temp in selected_temperatures:
             p = dict(base_params)
             p["temperature"] = temp
             payload = MDInput(**p).model_dump(mode="json", by_alias=True)
@@ -360,8 +381,8 @@ ctx: Context = None #type: ignore
 
 @mcp.tool()
 async def analyze_structure_optimization_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -395,8 +416,8 @@ async def analyze_structure_optimization_results(
 
 @mcp.tool()
 async def analyze_scf_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -432,8 +453,8 @@ async def analyze_scf_results(
 
 @mcp.tool()
 async def analyze_dos_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -473,8 +494,8 @@ async def analyze_dos_results(
 
 @mcp.tool()
 async def analyze_band_structure_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -513,8 +534,8 @@ async def analyze_band_structure_results(
 
 @mcp.tool()
 async def analyze_md_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -579,14 +600,14 @@ async def analyze_md_multi_results(
 
 @mcp.tool()
 async def submit_neb_calculation(
-    initial_cif_url: Optional[str] = None,
-    initial_task_id: Optional[str] = None,
-    final_cif_url: Optional[str] = None,
-    final_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    n_images: Optional[int] = None,
-    kpoint_density: Optional[float] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    initial_cif_url: str = None,
+    initial_task_id: str = None,
+    final_cif_url: str = None,
+    final_task_id: str = None,
+    queue_name: str = None,
+    n_images: int = None,
+    kpoint_density: float = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -623,12 +644,12 @@ async def submit_neb_calculation(
 
 @mcp.tool()
 async def submit_phonon_calculation(
-    cif_url: Optional[str] = None,
-    scf_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    kpoint_density: Optional[float] = None,
-    displacement: Optional[float] = None,
-    custom_incar: Optional[Dict[str, Any]] = None,
+    cif_url: str = None,
+    scf_task_id: str = None,
+    queue_name: str = None,
+    kpoint_density: float = None,
+    displacement: float = None,
+    custom_incar: Dict[str, Any] = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -666,8 +687,8 @@ async def submit_phonon_calculation(
 
 @mcp.tool()
 async def analyze_neb_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -697,8 +718,8 @@ async def analyze_neb_results(
 
 @mcp.tool()
 async def analyze_phonon_results(
-    task_id: Optional[str] = None,
-    file_url: Optional[str] = None,
+    task_id: str = None,
+    file_url: str = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -729,12 +750,12 @@ async def analyze_phonon_results(
 
 @mcp.tool()
 async def submit_custom_calculation(
-    cif_url: Optional[str] = None,
-    from_task_id: Optional[str] = None,
-    queue_name: Optional[str] = None,
-    incar: Optional[Dict[str, Any]] = None,
-    kpoint_density: Optional[float] = None,
-    kpoint_mode: Optional[str] = None,
+    cif_url: str = None,
+    from_task_id: str = None,
+    queue_name: str = None,
+    incar: Dict[str, Any] = None,
+    kpoint_density: float = None,
+    kpoint_mode: str = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
@@ -801,7 +822,7 @@ async def submit_custom_calculation(
 async def analyze_vasp_output(
     task_id: str,
     question: str,
-    model: Optional[str] = None,
+    model: str = None,
     ctx: Context = None,  # type: ignore
 ) -> Dict[str, Any]:
     """
